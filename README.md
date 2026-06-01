@@ -230,6 +230,7 @@ downstream verifiers.
 | Component | Version | Source |
 |---|---|---|
 | AIP spec | v1.0.0-draft | [`opena2a-org/agent-identity-protocol/AIP-SPEC.md`](https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md) |
+| `did:opena2a` method | v0.1 (W3C registration filed, PR `w3c/did-extensions#717`) | [`opena2a-standards/did-method-opena2a`](https://github.com/opena2a-standards/did-method-opena2a/blob/main/did-method-opena2a.md) |
 | Ed25519 test vector source | RFC 8032 §7.1 Tests 1, 2, 3 | [datatracker.ietf.org/doc/html/rfc8032](https://datatracker.ietf.org/doc/html/rfc8032) |
 | Go Ed25519 | `crypto/ed25519` (Go 1.22+ standard library) | [pkg.go.dev/crypto/ed25519](https://pkg.go.dev/crypto/ed25519) |
 | Python Ed25519 | `cryptography >= 42.0.0` | [pyca/cryptography](https://github.com/pyca/cryptography) |
@@ -288,6 +289,7 @@ scripts/generate-fixtures/       deterministic fixture generator (Go)
 - [`a2aproject/A2A#1885`](https://github.com/a2aproject/A2A/issues/1885) — the public maturity-bar claim this work delivers against
 - [`atx-conformance`](https://github.com/opena2a-standards/atx-conformance) — covers AIP §6.4 (VC `AgentTrustCredential`) transitively; same `issuer-primary` keypair as this suite
 - [`atp-conformance`](https://github.com/opena2a-standards/atp-conformance) — covers ATP wire protocol; the closest structural pattern this suite mirrors
+- [`opena2a-standards/did-method-opena2a`](https://github.com/opena2a-standards/did-method-opena2a) (Apache-2.0), the formal specification of the `did:opena2a:<type>:<id>` DID method used by this suite's challenge and response fixtures; filed for W3C DID Extensions registry inclusion on [`w3c/did-extensions#717`](https://github.com/w3c/did-extensions/pull/717)
 
 ## Contributing
 
