@@ -1,0 +1,107 @@
+{
+  "$schema": "https://specs.opena2a.org/schemas/conformance-profile-v1.json",
+  "suite": "aip-conformance",
+  "spec": {
+    "id": "AIP",
+    "name": "Agent Identity Protocol",
+    "version": "1.0.0-draft",
+    "ref": "https://github.com/opena2a-standards/agent-identity-protocol/blob/main/AIP-SPEC.md"
+  },
+  "fixtureManifest": "MANIFEST.sha256",
+  "verifiers": [
+    {
+      "language": "go",
+      "path": "verifiers/go",
+      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519, stdlib crypto)"
+    },
+    {
+      "language": "python",
+      "path": "verifiers/python",
+      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519 via cryptography)"
+    }
+  ],
+  "coveredTransitively": [
+    {
+      "specSection": "§6.4 W3C Verifiable Credential AgentTrustCredential",
+      "via": "https://github.com/opena2a-standards/atx-conformance",
+      "note": "ATX is the agent-specific VC that ATP §4.6 carves out; no fixtures in this repo exercise §6.4 directly"
+    },
+    {
+      "specSection": "§5 signed /authorize response",
+      "via": "https://github.com/opena2a-standards/atp-conformance",
+      "note": "same canonical signing form and Ed25519/hybrid path as the ATP trust proof"
+    }
+  ],
+  "notCovered": [
+    {
+      "item": "§4 signed capability grant artifact",
+      "reason": "canonical form underspecified in AIP v1.0.0-draft; fixtures require spec work first"
+    },
+    {
+      "item": "runtime surfaces (authorization enforcement, audit-log emission, drift detection)",
+      "reason": "not byte-stable artifacts; out of scope for an offline fixture suite"
+    }
+  ],
+  "requirements": [
+    {
+      "fixture": "fixtures/challenge-response-replay.json",
+      "name": "aip-v0.2/challenge-response-replay",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: nonce not reused"
+        }
+      ],
+      "expected": "REJECT[NONCE_REPLAY]",
+      "description": "An AIP §5.1 challenge-response transcript that reuses a nonce the verifier has already seen. The signature is mathematically valid, the publicKey matches the agentDid's bound key, the challenge is not expired — but the nonce appears in verifierState.seenNonces, modelling 'a prior verification already consumed this nonce.' Verifier MUST REJECT with NONCE_REPLAY."
+    },
+    {
+      "fixture": "fixtures/challenge-response-stale-challenge.json",
+      "name": "aip-v0.2/challenge-response-stale-challenge",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: challenge not expired (5-minute window)"
+        }
+      ],
+      "expected": "REJECT[CHALLENGE_EXPIRED]",
+      "description": "An AIP §5.1 challenge-response transcript where the challenge expired before the verifier's pinned clock. expiresAt is 25 minutes earlier than verifierState.clockRfc3339. The signature is otherwise mathematically valid and made by the agent's bound key. Verifier MUST REJECT with CHALLENGE_EXPIRED."
+    },
+    {
+      "fixture": "fixtures/challenge-response-valid.json",
+      "name": "aip-v0.2/challenge-response-valid",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol"
+        }
+      ],
+      "expected": "ACCEPT",
+      "description": "A well-formed AIP §5.1 challenge-response transcript. The IdP-issued challenge is bound to the agent's DID, the agent has signed the canonical 5-field payload with its bound key, the publicKey returned in the response matches the agentDid's bound key in verifierState, the nonce is unseen, and the challenge has not expired against the pinned verifier clock. Verifier MUST ACCEPT."
+    },
+    {
+      "fixture": "fixtures/challenge-response-wrong-key.json",
+      "name": "aip-v0.2/challenge-response-wrong-key",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: publicKey matches registered agent"
+        }
+      ],
+      "expected": "REJECT[UNTRUSTED_KEY]",
+      "description": "An AIP §5.1 challenge-response transcript where the agent signed with a key NOT bound to its DID. The signature is mathematically valid Ed25519, but the publicKey returned in the response does not match the bound key declared for testAgentDID in verifierState.agentBindings. Verifier MUST REJECT with UNTRUSTED_KEY."
+    }
+  ]
+}
