@@ -219,7 +219,7 @@ type KeyVector struct {
 
 func mustLoadKeyVector(path string) KeyVector {
 	abs := filepath.Join(outDir, path)
-	b, err := os.ReadFile(abs)
+	b, err := os.ReadFile(abs) //nolint:gosec // G304: build-time tool; outDir + constant path, no untrusted input
 	must(err)
 	var kv KeyVector
 	must(json.Unmarshal(b, &kv))

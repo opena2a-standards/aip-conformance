@@ -258,7 +258,7 @@ func main() {
 func collectFixturePaths(args []string) []string {
 	var out []string
 	for _, a := range args {
-		info, err := os.Stat(a)
+		info, err := os.Stat(a) //nolint:gosec // G703: operator-supplied CLI arg, not request-derived
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot stat %s: %v\n", a, err)
 			continue
@@ -279,7 +279,9 @@ func collectFixturePaths(args []string) []string {
 }
 
 func runFixture(path string) bool {
-	b, err := os.ReadFile(path)
+	// path originates from os.Args[1:] (operator-supplied fixture file/dir); this is a
+	// standalone CLI verifier with no network/request surface, so no untrusted taint.
+	b, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied CLI arg, not request-derived
 	if err != nil {
 		fmt.Printf("FAIL  %s\n       read error: %v\n", path, err)
 		return false
