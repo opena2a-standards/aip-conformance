@@ -156,6 +156,29 @@ All fixtures use:
 | `fixtures/challenge-response-stale-challenge.json` | REJECT (CHALLENGE_EXPIRED) | `challenge.expiresAt` is 25 minutes earlier than `verifierState.clockRfc3339`. The signature is otherwise mathematically valid and made by the agent's bound key. |
 | `fixtures/challenge-response-replay.json` | REJECT (NONCE_REPLAY) | Different challenge bytes from the valid fixture, but reuses its nonce. The signature is mathematically valid, the `publicKey` matches the bound key, the challenge is not expired — but the nonce appears in `verifierState.seenNonces`, modelling "a prior verification already consumed this nonce." |
 
+The full requirement-to-fixture mapping is machine-readable in
+[`conformance.json`](./conformance.json), regenerated from the fixtures by
+[`scripts/conformance_profile.py`](./scripts/conformance_profile.py) and
+CI-checked against drift. The profile also records what is covered
+transitively (§6.4 via `atx-conformance`, §5 authorize responses via
+`atp-conformance`) and what is not covered at all (§4 capability grants,
+runtime surfaces) so suite-to-suite claims stay explicit.
+
+## Continuous verification
+
+[`.github/workflows/conformance.yml`](./.github/workflows/conformance.yml)
+enforces every claim in this README on each push and pull request:
+
+1. Both reference verifiers run against `fixtures/` and must report
+   `4 pass, 0 fail`.
+2. The fixture generator re-runs and the committed fixture bytes plus
+   `MANIFEST.sha256` must reproduce exactly (byte-pin).
+3. The cross-implementation parity gate
+   ([`scripts/parity/parity.py`](./scripts/parity/parity.py)) asserts the Go
+   and Python verifiers agree per fixture on gate status, verdict, and
+   reject category, and publishes `parity-report.json` as a CI artifact.
+4. `conformance.json` must match the fixture set.
+
 ## Running the verifiers
 
 Both verifiers walk every `*.json` file in the directory you point them at
