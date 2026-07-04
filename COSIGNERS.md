@@ -45,13 +45,36 @@ v1.0.0-draft). See the README's *Honest scope notes* section for the
 canonical signing form, the challenge / response wire-format pinning,
 and the stateless-verifier replay model.
 
+## CI self-cosignature (baseline)
+
+Every push to `main` keyless-signs the current `MANIFEST.sha256` in CI
+(`sign-manifest` job in
+[`conformance.yml`](./.github/workflows/conformance.yml)), after the full
+conformance job (both verifiers, byte-pin, parity, profile) has passed. The
+signature is recorded in the public Rekor transparency log — that entry is the
+durable artifact; the workflow also uploads the bundle
+(`MANIFEST.sha256.cosign.bundle`) as a run artifact for convenience.
+
+To verify a bundle against the pinned CI identity:
+
+```bash
+cosign verify-blob \
+    --bundle MANIFEST.sha256.cosign.bundle \
+    --certificate-identity "https://github.com/opena2a-standards/aip-conformance/.github/workflows/conformance.yml@refs/heads/main" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    MANIFEST.sha256
+```
+
+Or look the digest up directly in Rekor (https://search.sigstore.dev) by the
+SHA-256 of `MANIFEST.sha256`.
+
 ## Cosignature registry
 
 ### v0.2 — `MANIFEST.sha256` attestation (current)
 
 | Cosigner | Commit SHA | Go verifier | Python verifier | Sigstore artifact | Date |
 |---|---|---|---|---|---|
-| opena2a-standards (self-cosigned, v0.2 baseline) | _set on first release_ | `4 pass, 0 fail` | `4 pass, 0 fail` | _set on first release_ | _set on first release_ |
+| opena2a-standards (self-cosigned baseline, CI) | every `main` push (see CI self-cosignature) | `4 pass, 0 fail` | `4 pass, 0 fail` | Rekor entry per push (keyless CI signature) | 2026-07-04 onward |
 
 Self-cosignature exists to anchor the baseline; second-party signatures
 are what close criterion (c). The (c) claim is not treated as closed for
