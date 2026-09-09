@@ -265,6 +265,15 @@ downstream verifiers.
 | Python Ed25519 | `cryptography >= 42.0.0` | [pyca/cryptography](https://github.com/pyca/cryptography) |
 | Conformance fixture format | v1 (this repo) | [`fixtures/challenge-response-valid.json#$schema`](./fixtures/challenge-response-valid.json) |
 
+The `agentDid`, `issuerDid`, and `keyId` strings in the vectors and fixtures
+are ecosystem-scoped `did:opena2a` identifiers, carried as opaque strings per
+AIP-SPEC §3.2. The suite pins the challenge-response transcript and the key
+binding; DID resolution is not exercised, for `did:opena2a` or for the
+provider-scoped `did:web` identifiers an identity provider issues. The
+`did:opena2a` registration is merged (`w3c/did-extensions#717`, 2026-07-04);
+the pinned method version stays v0.1 until a fixture depends on a later
+revision.
+
 ## Implementations that validate against this suite
 
 | Implementation | Verifier | Status |
