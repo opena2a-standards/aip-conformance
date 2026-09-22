@@ -1,0 +1,79 @@
+{
+  "$schema": "https://aip.opena2a.org/schemas/fixture-v1.json",
+  "name": "aip-v0.3/trust-score-measured-at-included-weight-0.50",
+  "description": "An AIP §6.1 composition sitting exactly on the threshold: verification, uptime and executionIsolation carry data (weights 25, 15 and 10), so includedWeight is 0.50, which is not below 0.50. The verifier MUST reach scoreStatus measured: weighted sum 0.41, renormalised 0.82, neutral-imputed ceiling 0.66, published score 0.66.",
+  "fixtureType": "trustScoreComposition",
+  "spec": [
+    {
+      "id": "AIP-SPEC",
+      "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+      "section": "§6.1 Multi-Factor Algorithm — unscored state: the threshold is strict (0.50 is measured)"
+    }
+  ],
+  "expected": {
+    "verifyResult": "MEASURED",
+    "composition": {
+      "scoreStatus": "measured",
+      "score": 0.66,
+      "includedWeight": 0.5
+    }
+  },
+  "trustScoreComposition": {
+    "factors": [
+      {
+        "factor": "verification",
+        "weight": 25,
+        "score": 0.8,
+        "confidence": 1
+      },
+      {
+        "factor": "uptime",
+        "weight": 15,
+        "score": 1,
+        "confidence": 1
+      },
+      {
+        "factor": "successRate",
+        "weight": 15,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "securityAlerts",
+        "weight": 15,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "compliance",
+        "weight": 10,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "executionIsolation",
+        "weight": 10,
+        "score": 0.6,
+        "confidence": 1
+      },
+      {
+        "factor": "age",
+        "weight": 5,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "driftDetection",
+        "weight": 3,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "userFeedback",
+        "weight": 2,
+        "score": null,
+        "confidence": 0
+      }
+    ]
+  }
+}

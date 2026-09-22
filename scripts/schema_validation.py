@@ -45,6 +45,9 @@ def main() -> int:
 
     for path in fixtures:
         doc = json.loads(path.read_text(encoding="utf-8"))
+        if doc.get("fixtureType", "challengeResponse") != "challengeResponse":
+            print(f"SKIP  {path.name}: fixtureType={doc.get('fixtureType')} carries no §5.1 transcript")
+            continue
         transcript = doc.get("challengeResponse")
         if not transcript or "challenge" not in transcript or "response" not in transcript:
             print(f"FAIL  {path.name}: missing challengeResponse.challenge/.response")

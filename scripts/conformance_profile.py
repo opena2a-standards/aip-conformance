@@ -35,12 +35,12 @@ SUITE = {
         {
             "language": "go",
             "path": "verifiers/go",
-            "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519, stdlib crypto)",
+            "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519, stdlib crypto) and §6.1 trust-score composition (unscored state, redistribution, anti-gaming ceiling)",
         },
         {
             "language": "python",
             "path": "verifiers/python",
-            "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519 via cryptography)",
+            "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519 via cryptography) and §6.1 trust-score composition (unscored state, redistribution, anti-gaming ceiling)",
         },
     ],
     "coveredTransitively": [

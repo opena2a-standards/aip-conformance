@@ -12,12 +12,12 @@
     {
       "language": "go",
       "path": "verifiers/go",
-      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519, stdlib crypto)"
+      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519, stdlib crypto) and §6.1 trust-score composition (unscored state, redistribution, anti-gaming ceiling)"
     },
     {
       "language": "python",
       "path": "verifiers/python",
-      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519 via cryptography)"
+      "coverage": "AIP §5.1 challenge-response transcript verification (Ed25519 via cryptography) and §6.1 trust-score composition (unscored state, redistribution, anti-gaming ceiling)"
     }
   ],
   "coveredTransitively": [
@@ -102,6 +102,51 @@
       ],
       "expected": "REJECT[UNTRUSTED_KEY]",
       "description": "An AIP §5.1 challenge-response transcript where the agent signed with a key NOT bound to its DID. The signature is mathematically valid Ed25519, but the publicKey returned in the response does not match the bound key declared for testAgentDID in verifierState.agentBindings. Verifier MUST REJECT with UNTRUSTED_KEY."
+    },
+    {
+      "fixture": "fixtures/trust-score-measured-at-included-weight-0.50.json",
+      "name": "aip-v0.3/trust-score-measured-at-included-weight-0.50",
+      "fixtureType": "trustScoreComposition",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§6.1 Multi-Factor Algorithm — unscored state: the threshold is strict (0.50 is measured)"
+        }
+      ],
+      "expected": "MEASURED",
+      "description": "An AIP §6.1 composition sitting exactly on the threshold: verification, uptime and executionIsolation carry data (weights 25, 15 and 10), so includedWeight is 0.50, which is not below 0.50. The verifier MUST reach scoreStatus measured: weighted sum 0.41, renormalised 0.82, neutral-imputed ceiling 0.66, published score 0.66."
+    },
+    {
+      "fixture": "fixtures/trust-score-measured-six-factors-capped.json",
+      "name": "aip-v0.3/trust-score-measured-six-factors-capped",
+      "fixtureType": "trustScoreComposition",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§6.1 Multi-Factor Algorithm — exclusion, redistribution and the anti-gaming ceiling"
+        }
+      ],
+      "expected": "MEASURED",
+      "description": "An AIP §6.1 composition with the six measured factors of the reference implementation carrying data and the three proposed factors excluded: includedWeight 0.85, measured. The weighted sum over the included factors is 0.735; renormalised over 0.85 it is 0.8647, and the neutral-imputed ceiling (0.735 plus 0.15 at 0.5) is 0.81, so the published score is the lower value 0.81. The verifier MUST reach scoreStatus measured with score 0.81."
+    },
+    {
+      "fixture": "fixtures/trust-score-unscored-zero-event-agent.json",
+      "name": "aip-v0.3/trust-score-unscored-zero-event-agent",
+      "fixtureType": "trustScoreComposition",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§6.1 Multi-Factor Algorithm — unscored state: includedWeight below 0.50"
+        }
+      ],
+      "expected": "UNSCORED",
+      "description": "An AIP §6.1 composition for an agent with no verification events: verification, uptime and successRate have no data (confidence 0), and the three proposed factors (compliance, driftDetection, userFeedback) are unmeasured. Only securityAlerts, executionIsolation and age carry data, so includedWeight is 0.30. Under the unscored rule the verifier MUST reach scoreStatus unscored with score null and unscoredReason insufficient_data. The composition rule alone (exclusion, redistribution, neutral-imputed ceiling) would publish 0.575 here, which is the number the rule exists to withhold."
     }
   ]
 }

@@ -172,6 +172,90 @@ def collect_fixture_paths(args: List[str]) -> List[Path]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# AIP §6.1 trust-score composition (MUST match the Go verifier)
+# ---------------------------------------------------------------------------
+
+def _round4(v: float) -> float:
+    return round(v * 10000) / 10000
+
+
+@dataclass
+class Composition:
+    verdict: str               # "MEASURED" or "UNSCORED"
+    score: float = 0.0
+    included_weight: float = 0.0
+    unscored_reason: str = ""
+
+
+# AIP §6.1 included-weight threshold: below it the agent is unscored. The section
+# is the one home of this number.
+UNSCORED_THRESHOLD = 0.50
+
+
+def compose_trust_score(payload: dict) -> Composition:
+    """Apply AIP §6.1 to the fixture's factor inputs: a factor with confidence 0 or
+    no score is excluded and its weight redistributed proportionally (renormalised
+    over the included weight); the published value is capped at the neutral-imputed
+    composite (every excluded factor scored 0.5). When the included weight is below
+    the threshold the agent is unscored: no composite is published (score null),
+    the reason is insufficient_data."""
+    weighted_sum = 0.0
+    included_weight = 0.0
+    excluded_weight = 0.0
+    for f in payload["factors"]:
+        w = f["weight"] / 100
+        if f.get("confidence", 0) <= 0 or f.get("score") is None:
+            excluded_weight += w
+            continue
+        included_weight += w
+        weighted_sum += w * f["score"] * f["confidence"]
+    if _round4(included_weight) < UNSCORED_THRESHOLD:
+        return Composition(
+            verdict="UNSCORED",
+            included_weight=_round4(included_weight),
+            unscored_reason="insufficient_data",
+        )
+    renormalised = weighted_sum / included_weight if included_weight > 0 else 0.0
+    imputed = weighted_sum + excluded_weight * 0.5
+    return Composition(
+        verdict="MEASURED",
+        score=_round4(min(renormalised, imputed)),
+        included_weight=_round4(included_weight),
+    )
+
+
+def run_composition(path: Path, f: dict) -> bool:
+    payload = f.get("trustScoreComposition")
+    exp = (f.get("expected") or {}).get("composition")
+    if not payload or not exp:
+        print(f"FAIL  {path}\n       trustScoreComposition payload or expected.composition missing")
+        return False
+    r = compose_trust_score(payload)
+    expected_verdict = f["expected"]["verifyResult"]
+
+    expected_detail = f"{expected_verdict} [scoreStatus={exp['scoreStatus']}"
+    expected_detail += " score=null" if exp.get("score") is None else f" score={exp['score']:.4f}"
+    expected_detail += f" includedWeight={exp['includedWeight']:.4f}"
+    if exp.get("unscoredReason"):
+        expected_detail += f" unscoredReason={exp['unscoredReason']}"
+    expected_detail += "]"
+
+    if r.verdict == "UNSCORED":
+        observed_detail = f"UNSCORED[score=null unscoredReason={r.unscored_reason} includedWeight={r.included_weight:.4f}]"
+    else:
+        observed_detail = f"MEASURED[score={r.score:.4f} includedWeight={r.included_weight:.4f}]"
+
+    ok = r.verdict == expected_verdict and _round4(r.included_weight) == _round4(exp["includedWeight"])
+    if ok and r.verdict == "MEASURED":
+        ok = exp.get("score") is not None and _round4(r.score) == _round4(exp["score"])
+    if ok and r.verdict == "UNSCORED":
+        ok = exp.get("score") is None and (not exp.get("unscoredReason") or exp["unscoredReason"] == r.unscored_reason)
+    gate = "PASS" if ok else "FAIL"
+    print(f"{gate}  {path}\n       expected: {expected_detail}\n       observed: {observed_detail}")
+    return ok
+
+
 def run_fixture(path: Path) -> bool:
     try:
         f = json.loads(path.read_text())
@@ -179,8 +263,10 @@ def run_fixture(path: Path) -> bool:
         print(f"FAIL  {path}\n       parse error: {e}")
         return False
 
+    if f.get("fixtureType") == "trustScoreComposition":
+        return run_composition(path, f)
     if f.get("fixtureType") != "challengeResponse":
-        print(f"SKIP  {path}\n       fixtureType={f.get('fixtureType')} (this verifier only handles challengeResponse)")
+        print(f"SKIP  {path}\n       fixtureType={f.get('fixtureType')} (this verifier handles challengeResponse and trustScoreComposition)")
         return True
 
     if not f.get("challengeResponse"):

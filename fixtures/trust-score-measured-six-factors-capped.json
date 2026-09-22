@@ -1,0 +1,79 @@
+{
+  "$schema": "https://aip.opena2a.org/schemas/fixture-v1.json",
+  "name": "aip-v0.3/trust-score-measured-six-factors-capped",
+  "description": "An AIP §6.1 composition with the six measured factors of the reference implementation carrying data and the three proposed factors excluded: includedWeight 0.85, measured. The weighted sum over the included factors is 0.735; renormalised over 0.85 it is 0.8647, and the neutral-imputed ceiling (0.735 plus 0.15 at 0.5) is 0.81, so the published score is the lower value 0.81. The verifier MUST reach scoreStatus measured with score 0.81.",
+  "fixtureType": "trustScoreComposition",
+  "spec": [
+    {
+      "id": "AIP-SPEC",
+      "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+      "section": "§6.1 Multi-Factor Algorithm — exclusion, redistribution and the anti-gaming ceiling"
+    }
+  ],
+  "expected": {
+    "verifyResult": "MEASURED",
+    "composition": {
+      "scoreStatus": "measured",
+      "score": 0.81,
+      "includedWeight": 0.85
+    }
+  },
+  "trustScoreComposition": {
+    "factors": [
+      {
+        "factor": "verification",
+        "weight": 25,
+        "score": 0.9,
+        "confidence": 1
+      },
+      {
+        "factor": "uptime",
+        "weight": 15,
+        "score": 0.95,
+        "confidence": 1
+      },
+      {
+        "factor": "successRate",
+        "weight": 15,
+        "score": 0.8,
+        "confidence": 1
+      },
+      {
+        "factor": "securityAlerts",
+        "weight": 15,
+        "score": 1,
+        "confidence": 1
+      },
+      {
+        "factor": "compliance",
+        "weight": 10,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "executionIsolation",
+        "weight": 10,
+        "score": 0.6,
+        "confidence": 1
+      },
+      {
+        "factor": "age",
+        "weight": 5,
+        "score": 0.75,
+        "confidence": 1
+      },
+      {
+        "factor": "driftDetection",
+        "weight": 3,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "userFeedback",
+        "weight": 2,
+        "score": null,
+        "confidence": 0
+      }
+    ]
+  }
+}
