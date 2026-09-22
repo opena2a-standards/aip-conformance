@@ -127,11 +127,17 @@ type compositionResult struct {
 
 func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
 
+// unscoredThreshold is the AIP §6.1 included-weight threshold: below it the
+// agent is unscored. The section is the one home of this number.
+const unscoredThreshold = 0.50
+
 // composeTrustScore applies AIP §6.1 to the fixture's factor inputs. A factor
 // with confidence 0 or no score is excluded and its weight redistributed
 // proportionally (the sum is renormalised over the included weight); the
 // published value is capped at the neutral-imputed composite (every excluded
 // factor scored 0.5), so withholding data never outscores a neutral measurement.
+// When the included weight is below the threshold the agent is unscored: no
+// composite is published (score null), the reason is insufficient_data.
 func composeTrustScore(c *TrustScoreComposition) compositionResult {
 	var weightedSum, includedWeight, excludedWeight float64
 	for _, f := range c.Factors {
@@ -142,6 +148,13 @@ func composeTrustScore(c *TrustScoreComposition) compositionResult {
 		}
 		includedWeight += w
 		weightedSum += w * (*f.Score) * f.Confidence
+	}
+	if round4(includedWeight) < unscoredThreshold {
+		return compositionResult{
+			verdict:        "UNSCORED",
+			includedWeight: round4(includedWeight),
+			unscoredReason: "insufficient_data",
+		}
 	}
 	renormalised := 0.0
 	if includedWeight > 0 {

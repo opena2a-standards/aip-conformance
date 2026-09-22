@@ -188,11 +188,18 @@ class Composition:
     unscored_reason: str = ""
 
 
+# AIP §6.1 included-weight threshold: below it the agent is unscored. The section
+# is the one home of this number.
+UNSCORED_THRESHOLD = 0.50
+
+
 def compose_trust_score(payload: dict) -> Composition:
     """Apply AIP §6.1 to the fixture's factor inputs: a factor with confidence 0 or
     no score is excluded and its weight redistributed proportionally (renormalised
     over the included weight); the published value is capped at the neutral-imputed
-    composite (every excluded factor scored 0.5)."""
+    composite (every excluded factor scored 0.5). When the included weight is below
+    the threshold the agent is unscored: no composite is published (score null),
+    the reason is insufficient_data."""
     weighted_sum = 0.0
     included_weight = 0.0
     excluded_weight = 0.0
@@ -203,6 +210,12 @@ def compose_trust_score(payload: dict) -> Composition:
             continue
         included_weight += w
         weighted_sum += w * f["score"] * f["confidence"]
+    if _round4(included_weight) < UNSCORED_THRESHOLD:
+        return Composition(
+            verdict="UNSCORED",
+            included_weight=_round4(included_weight),
+            unscored_reason="insufficient_data",
+        )
     renormalised = weighted_sum / included_weight if included_weight > 0 else 0.0
     imputed = weighted_sum + excluded_weight * 0.5
     return Composition(

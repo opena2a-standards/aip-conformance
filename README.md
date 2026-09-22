@@ -3,9 +3,10 @@
 Conformance fixtures and reference verifiers for the
 [Agent Identity Protocol (AIP) v1.0.0-draft](https://github.com/opena2a-org/agent-identity-protocol).
 
-**Status: v0.2 — AIP §5.1 challenge-response transcript fixtures shipped
-(4 fixtures, 2 verifiers, `MANIFEST.sha256` pinned). AIP §6.4 (VC
-`AgentTrustCredential`) conformance is covered transitively via
+**Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (4) and
+§6.1 trust-score composition fixtures (3) shipped, 2 verifiers,
+`MANIFEST.sha256` pinned. AIP §6.4 (VC `AgentTrustCredential`) conformance
+is covered transitively via
 [`atx-conformance`](https://github.com/opena2a-standards/atx-conformance).**
 
 Each §5.1 fixture is a byte-stable JSON file that bundles an IdP-issued
@@ -27,6 +28,30 @@ the `aim-did-rfc9421/*` set."
 
 License: Apache 2.0. All keypairs, seeds, and identifiers in this
 repository are TEST-ONLY.
+
+## §6.1 trust-score composition fixtures
+
+A `trustScoreComposition` fixture carries the nine §6.1 factors in table
+order, each with its weight in points of 100, its per-factor score (null
+when there is no data) and its data-availability confidence, plus the
+state a verifier must reach: `expected.verifyResult` is `MEASURED` or
+`UNSCORED`, and `expected.composition` pins `scoreStatus`, `score`
+(`null` when unscored), `includedWeight` and `unscoredReason`. Both
+verifiers compose the inputs under §6.1: exclusion of no-data factors,
+proportional redistribution, the neutral-imputed ceiling, and the
+unscored state when the included weight is below 0.50 (the section is the
+one home of that threshold). Scores compare at four decimals.
+
+| Fixture | includedWeight | Expected |
+|---|---|---|
+| `trust-score-unscored-zero-event-agent` | 0.30 | `UNSCORED`, score `null`, `insufficient_data` (the composition rule alone would publish 0.575) |
+| `trust-score-measured-six-factors-capped` | 0.85 | `MEASURED`, score 0.81 (the ceiling binds: renormalised 0.8647) |
+| `trust-score-measured-at-included-weight-0.50` | 0.50 | `MEASURED`, score 0.66 (the threshold is strict) |
+
+The unscored cell was proven red first: against §6.1 as it read before the
+unscored amendment both verifiers composed 0.575 for the zero-event agent
+and the cell failed; with the amended rule it passes and the two measured
+controls are unchanged.
 
 ## Why AIP fixtures look different from ATX and ATP
 
