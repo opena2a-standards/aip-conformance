@@ -1,6 +1,9 @@
-# AIP v1.0.0-draft §5.1 conformance fixtures — SHA-256 (per file, path-sorted)
+# AIP conformance fixtures (§5.1 challenge-response, §6.1 trust-score composition) — SHA-256 (per file, path-sorted)
 # Re-running scripts/generate-fixtures MUST reproduce these exact hashes.
 b742c9d06c314eb6ed765c1a3edab221b5a310c27121a8f14e54f9e6913d4ba1  fixtures/challenge-response-replay.json
 bc4b0ccd7156da12ad75e35f2b04b53cf0585e5080599b6f14279cd403092b2a  fixtures/challenge-response-stale-challenge.json
 ad3485a3a01cadc6fdfd2fc593e21d714ad71d38a254b14f674140b2d5bd3fe0  fixtures/challenge-response-valid.json
 5c485cd1e18a193798b4033b63a775102e069c80992c0c7b9b6d1b561caae4f7  fixtures/challenge-response-wrong-key.json
+8258d2ebd02008ef1b158187ce06fab6c54260eaf3eecb5be7573f058592bb7b  fixtures/trust-score-measured-at-included-weight-0.50.json
+7c8233b79bd0ee999206b8b62944da377575064491da2f187881e69cf43bacfe  fixtures/trust-score-measured-six-factors-capped.json
+835abc90284441f62c2acd40cbb272f85b23d87c168a567ad42ede1c9cd834af  fixtures/trust-score-unscored-zero-event-agent.json

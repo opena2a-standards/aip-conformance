@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,6 +49,30 @@ type ExpectedOutcome struct {
 	VerifyResult   string `json:"verifyResult"`
 	RejectCategory string `json:"rejectCategory,omitempty"`
 	ReasonContains string `json:"reasonContains,omitempty"`
+	// Composition is set on trustScoreComposition fixtures only.
+	Composition *ExpectedComposition `json:"composition,omitempty"`
+}
+
+// ExpectedComposition is the AIP §6.1 state a composition fixture pins.
+type ExpectedComposition struct {
+	ScoreStatus    string   `json:"scoreStatus"`
+	Score          *float64 `json:"score"`
+	IncludedWeight float64  `json:"includedWeight"`
+	UnscoredReason string   `json:"unscoredReason,omitempty"`
+}
+
+// FactorInput is one §6.1 factor as an implementation holds it before
+// composition: identifier, weight in points of 100, per-factor score (nil when
+// there is no data) and the data-availability confidence.
+type FactorInput struct {
+	Factor     string   `json:"factor"`
+	Weight     int      `json:"weight"`
+	Score      *float64 `json:"score"`
+	Confidence float64  `json:"confidence"`
+}
+
+type TrustScoreComposition struct {
+	Factors []FactorInput `json:"factors"`
 }
 
 type ChallengeBody struct {
@@ -85,6 +110,93 @@ type Fixture struct {
 	VerifierState     VerifierState      `json:"verifierState"`
 	Expected          ExpectedOutcome    `json:"expected"`
 	ChallengeResponse *ChallengeResponse `json:"challengeResponse,omitempty"`
+	// TrustScoreComposition is set on trustScoreComposition fixtures only.
+	TrustScoreComposition *TrustScoreComposition `json:"trustScoreComposition,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// AIP §6.1 trust-score composition (MUST match the Python verifier)
+// ---------------------------------------------------------------------------
+
+type compositionResult struct {
+	verdict        string // "MEASURED" or "UNSCORED"
+	score          float64
+	includedWeight float64
+	unscoredReason string
+}
+
+func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
+
+// composeTrustScore applies AIP §6.1 to the fixture's factor inputs. A factor
+// with confidence 0 or no score is excluded and its weight redistributed
+// proportionally (the sum is renormalised over the included weight); the
+// published value is capped at the neutral-imputed composite (every excluded
+// factor scored 0.5), so withholding data never outscores a neutral measurement.
+func composeTrustScore(c *TrustScoreComposition) compositionResult {
+	var weightedSum, includedWeight, excludedWeight float64
+	for _, f := range c.Factors {
+		w := float64(f.Weight) / 100
+		if f.Confidence <= 0 || f.Score == nil {
+			excludedWeight += w
+			continue
+		}
+		includedWeight += w
+		weightedSum += w * (*f.Score) * f.Confidence
+	}
+	renormalised := 0.0
+	if includedWeight > 0 {
+		renormalised = weightedSum / includedWeight
+	}
+	imputed := weightedSum + excludedWeight*0.5
+	return compositionResult{
+		verdict:        "MEASURED",
+		score:          round4(math.Min(renormalised, imputed)),
+		includedWeight: round4(includedWeight),
+	}
+}
+
+func runComposition(path string, f Fixture) bool {
+	if f.TrustScoreComposition == nil || f.Expected.Composition == nil {
+		fmt.Printf("FAIL  %s\n       trustScoreComposition payload or expected.composition missing\n", path)
+		return false
+	}
+	exp := f.Expected.Composition
+	r := composeTrustScore(f.TrustScoreComposition)
+
+	expectedDetail := fmt.Sprintf("%s [scoreStatus=%s", f.Expected.VerifyResult, exp.ScoreStatus)
+	if exp.Score != nil {
+		expectedDetail += fmt.Sprintf(" score=%.4f", *exp.Score)
+	} else {
+		expectedDetail += " score=null"
+	}
+	expectedDetail += fmt.Sprintf(" includedWeight=%.4f", exp.IncludedWeight)
+	if exp.UnscoredReason != "" {
+		expectedDetail += " unscoredReason=" + exp.UnscoredReason
+	}
+	expectedDetail += "]"
+
+	observedDetail := r.verdict + "["
+	if r.verdict == "UNSCORED" {
+		observedDetail += "score=null unscoredReason=" + r.unscoredReason
+	} else {
+		observedDetail += fmt.Sprintf("score=%.4f", r.score)
+	}
+	observedDetail += fmt.Sprintf(" includedWeight=%.4f]", r.includedWeight)
+
+	ok := r.verdict == f.Expected.VerifyResult &&
+		round4(r.includedWeight) == round4(exp.IncludedWeight)
+	if ok && r.verdict == "MEASURED" {
+		ok = exp.Score != nil && round4(r.score) == round4(*exp.Score)
+	}
+	if ok && r.verdict == "UNSCORED" {
+		ok = exp.Score == nil && (exp.UnscoredReason == "" || exp.UnscoredReason == r.unscoredReason)
+	}
+	gate := "PASS"
+	if !ok {
+		gate = "FAIL"
+	}
+	fmt.Printf("%s  %s\n       expected: %s\n       observed: %s\n", gate, path, expectedDetail, observedDetail)
+	return ok
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +404,11 @@ func runFixture(path string) bool {
 		return false
 	}
 
+	if f.FixtureType == "trustScoreComposition" {
+		return runComposition(path, f)
+	}
 	if f.FixtureType != "challengeResponse" {
-		fmt.Printf("SKIP  %s\n       fixtureType=%s (this verifier only handles challengeResponse)\n", path, f.FixtureType)
+		fmt.Printf("SKIP  %s\n       fixtureType=%s (this verifier handles challengeResponse and trustScoreComposition)\n", path, f.FixtureType)
 		return true
 	}
 	if f.ChallengeResponse == nil {

@@ -49,7 +49,7 @@ VERIFIERS = {
 # `PASS  <path>` or `FAIL  <path>` opens a per-fixture block.
 BLOCK_RE = re.compile(r"^(PASS|FAIL)\s+(\S+)")
 # `observed: ACCEPT` or `observed: REJECT[CATEGORY: reason]`
-OBSERVED_RE = re.compile(r"^\s*observed:\s+(ACCEPT|REJECT\[([A-Z_]+))")
+OBSERVED_RE = re.compile(r"^\s*observed:\s+(ACCEPT|UNSCORED|MEASURED|REJECT\[([A-Z_]+))")
 
 
 def run_verifier(name: str, spec: dict) -> tuple[int, dict[str, dict]]:
@@ -69,8 +69,8 @@ def run_verifier(name: str, spec: dict) -> tuple[int, dict[str, dict]]:
             continue
         om = OBSERVED_RE.match(line)
         if om:
-            if om.group(1) == "ACCEPT":
-                records[current]["verdict"] = "ACCEPT"
+            if om.group(1) in ("ACCEPT", "UNSCORED", "MEASURED"):
+                records[current]["verdict"] = om.group(1)
             else:
                 records[current]["verdict"] = "REJECT"
                 records[current]["category"] = om.group(2)

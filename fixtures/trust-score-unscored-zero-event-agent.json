@@ -1,0 +1,80 @@
+{
+  "$schema": "https://aip.opena2a.org/schemas/fixture-v1.json",
+  "name": "aip-v0.3/trust-score-unscored-zero-event-agent",
+  "description": "An AIP §6.1 composition for an agent with no verification events: verification, uptime and successRate have no data (confidence 0), and the three proposed factors (compliance, driftDetection, userFeedback) are unmeasured. Only securityAlerts, executionIsolation and age carry data, so includedWeight is 0.30. Under the unscored rule the verifier MUST reach scoreStatus unscored with score null and unscoredReason insufficient_data. The composition rule alone (exclusion, redistribution, neutral-imputed ceiling) would publish 0.575 here, which is the number the rule exists to withhold.",
+  "fixtureType": "trustScoreComposition",
+  "spec": [
+    {
+      "id": "AIP-SPEC",
+      "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+      "section": "§6.1 Multi-Factor Algorithm — unscored state: includedWeight below 0.50"
+    }
+  ],
+  "expected": {
+    "verifyResult": "UNSCORED",
+    "composition": {
+      "scoreStatus": "unscored",
+      "score": null,
+      "includedWeight": 0.3,
+      "unscoredReason": "insufficient_data"
+    }
+  },
+  "trustScoreComposition": {
+    "factors": [
+      {
+        "factor": "verification",
+        "weight": 25,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "uptime",
+        "weight": 15,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "successRate",
+        "weight": 15,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "securityAlerts",
+        "weight": 15,
+        "score": 1,
+        "confidence": 1
+      },
+      {
+        "factor": "compliance",
+        "weight": 10,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "executionIsolation",
+        "weight": 10,
+        "score": 0.6,
+        "confidence": 1
+      },
+      {
+        "factor": "age",
+        "weight": 5,
+        "score": 0.3,
+        "confidence": 1
+      },
+      {
+        "factor": "driftDetection",
+        "weight": 3,
+        "score": null,
+        "confidence": 0
+      },
+      {
+        "factor": "userFeedback",
+        "weight": 2,
+        "score": null,
+        "confidence": 0
+      }
+    ]
+  }
+}
