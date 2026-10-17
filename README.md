@@ -100,7 +100,7 @@ enforces every claim in this README on each push and pull request:
 1. Both reference verifiers run against `fixtures/` and must report 0 fail.
 2. The generator must reproduce the committed fixture bytes and `MANIFEST.sha256` exactly.
 3. The Go and Python verifiers must agree per fixture ([`scripts/parity/parity.py`](./scripts/parity/parity.py)).
-4. `conformance.json` must match the fixture set.
+4. `conformance.json` and the verifier status rows in `docs/ecosystem.md` must match the fixture set.
 5. Each challenge and response must validate against the vendored AIP-SPEC schemas ([`scripts/schema_validation.py`](./scripts/schema_validation.py)).
 
 Each gate in full: [docs/how-it-works.md](docs/how-it-works.md#continuous-verification).

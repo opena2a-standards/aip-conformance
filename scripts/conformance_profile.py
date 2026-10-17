@@ -7,18 +7,27 @@ DERIVED from the fixtures themselves (each fixture carries its spec
 references and expected block), so the profile cannot drift from the fixture
 set: regeneration is deterministic and CI verifies the committed file matches.
 
+The verifier status rows in docs/ecosystem.md pin a `<pass> / <total> PASS`
+count by hand, so both modes also compare those rows with the fixture count
+and exit 1 when a row pins a different number.
+
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
-    python3 scripts/conformance_profile.py --check    # exit 1 if committed file is stale
+    python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or a status row is stale
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT = REPO_ROOT / "conformance.json"
+ECOSYSTEM = REPO_ROOT / "docs" / "ecosystem.md"
+
+# Status cell of a verifier row in docs/ecosystem.md: `<pass> / <total> PASS`.
+STATUS_RE = re.compile(r"^(\d+) / (\d+) PASS$")
 
 # --- suite metadata (hand-maintained; everything under `requirements` is derived) ---
 SUITE = {
@@ -68,9 +77,13 @@ SUITE = {
 }
 
 
+def fixture_paths() -> list[Path]:
+    return sorted((REPO_ROOT / "fixtures").glob("*.json"))
+
+
 def build() -> dict:
     requirements = []
-    for path in sorted((REPO_ROOT / "fixtures").glob("*.json")):
+    for path in fixture_paths():
         fx = json.loads(path.read_text())
         expected = fx["expected"]
         outcome = expected["verifyResult"]
@@ -92,6 +105,46 @@ def build() -> dict:
     return profile
 
 
+def verifier_status_drift() -> list[str]:
+    """Compare the verifier status rows in docs/ecosystem.md with the fixture set.
+
+    Each verifier in SUITE has a row in the implementations table whose
+    Implementation cell names the verifier path and says `(this repo)`, and
+    whose Status cell reads `<pass> / <total> PASS`. CI runs every verifier
+    over every fixture and fails on any FAIL line, so the only current value
+    for that cell is `N / N PASS` with N the number of fixtures. Returns one
+    message per missing row or per row that pins a different number.
+    """
+    expected = len(fixture_paths())
+    if not ECOSYSTEM.exists():
+        return ["docs/ecosystem.md missing"]
+    status_by_path: dict[str, str] = {}
+    for line in ECOSYSTEM.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or "(this repo)" not in cells[0]:
+            continue
+        for verifier in SUITE["verifiers"]:
+            if verifier["path"] in cells[0]:
+                status_by_path[verifier["path"]] = cells[2]
+    problems = []
+    for verifier in SUITE["verifiers"]:
+        path = verifier["path"]
+        status = status_by_path.get(path)
+        if status is None:
+            problems.append(f"docs/ecosystem.md: no status row for {path}")
+            continue
+        match = STATUS_RE.match(status)
+        if not match or int(match.group(1)) != expected or int(match.group(2)) != expected:
+            problems.append(
+                f"docs/ecosystem.md: {path} status reads {status!r}; "
+                f"the fixture set has {expected} fixtures, so the row must read "
+                f"'{expected} / {expected} PASS'"
+            )
+    return problems
+
+
 def main() -> int:
     rendered = json.dumps(build(), indent=2, ensure_ascii=False) + "\n"
     if "--check" in sys.argv:
@@ -102,9 +155,18 @@ def main() -> int:
             print("conformance.json is stale; run scripts/conformance_profile.py")
             return 1
         print("conformance.json is current")
-        return 0
-    OUT.write_text(rendered)
-    print(f"wrote conformance.json ({len(build()['requirements'])} requirements)")
+    else:
+        OUT.write_text(rendered)
+        print(f"wrote conformance.json ({len(build()['requirements'])} requirements)")
+    drift = verifier_status_drift()
+    for problem in drift:
+        print(problem)
+    if drift:
+        return 1
+    print(
+        "docs/ecosystem.md verifier status rows match the fixture set "
+        f"({len(fixture_paths())} fixtures)"
+    )
     return 0
 
 
