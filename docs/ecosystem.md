@@ -20,7 +20,7 @@ Independent second-party implementations and cosigners are tracked in
 |---|---|---|
 | [`atx-conformance`](https://github.com/opena2a-standards/atx-conformance) | ATX v1.0 credential schema | 8 fixtures, 2 verifiers, `MANIFEST.sha256` pinned |
 | [`atp-conformance`](https://github.com/opena2a-standards/atp-conformance) | ATP v1.0.0-rc1 protocol | 4 fixtures (discovery, trust-proof baseline, trust-proof hybrid, Signed Tree Head), 2 verifiers, `MANIFEST.sha256` pinned |
-| `aip-conformance` (this repo) | AIP v1.0.0-draft identity protocol | v0.2: 4 §5.1 challenge-response fixtures, 2 verifiers, `MANIFEST.sha256` pinned; §6.4 covered transitively via `atx-conformance` cross-link |
+| `aip-conformance` (this repo) | AIP v1.0.0-draft identity protocol | v0.3: 4 §5.1 challenge-response fixtures and 3 §6.1 trust-score composition fixtures, 2 verifiers, `MANIFEST.sha256` pinned; §6.4 covered transitively via `atx-conformance` cross-link |
 
 ## References
 

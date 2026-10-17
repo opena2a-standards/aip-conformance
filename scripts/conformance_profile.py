@@ -7,13 +7,16 @@ DERIVED from the fixtures themselves (each fixture carries its spec
 references and expected block), so the profile cannot drift from the fixture
 set: regeneration is deterministic and CI verifies the committed file matches.
 
-The verifier status rows in docs/ecosystem.md pin a `<pass> / <total> PASS`
-count by hand, so both modes also compare those rows with the fixture count
-and exit 1 when a row pins a different number.
+Two kinds of row in docs/ecosystem.md pin numbers by hand: the verifier
+status rows pin a `<pass> / <total> PASS` count, and this repository's row in
+the sibling-repositories table pins the suite version, a fixture count per
+spec section and a verifier count. Both modes also compare those rows with
+the fixture set, the verifier list and the version README.md declares on its
+status line, and exit 1 when a row pins a different value.
 
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
-    python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or a status row is stale
+    python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or an ecosystem.md row is stale
 """
 from __future__ import annotations
 
@@ -25,9 +28,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT = REPO_ROOT / "conformance.json"
 ECOSYSTEM = REPO_ROOT / "docs" / "ecosystem.md"
+README = REPO_ROOT / "README.md"
 
 # Status cell of a verifier row in docs/ecosystem.md: `<pass> / <total> PASS`.
 STATUS_RE = re.compile(r"^(\d+) / (\d+) PASS$")
+# The suite version README.md declares on its status line: `**Status: vX.Y`.
+README_VERSION_RE = re.compile(r"\*\*Status: v(\d+(?:\.\d+)+)")
+# The spec section a fixture's spec reference opens with: `§X.Y ...`.
+SECTION_RE = re.compile(r"^§(\d+(?:\.\d+)*)")
+# The values the sibling-repositories row pins in its Status cell: the
+# version it opens with, each `<count> §X.Y` fixture group, `<count> verifiers`.
+SIBLING_VERSION_RE = re.compile(r"^v(\d+(?:\.\d+)+):")
+SIBLING_GROUP_RE = re.compile(r"(?<![\d.])(\d+) §(\d+(?:\.\d+)*)")
+SIBLING_VERIFIERS_RE = re.compile(r"(?<![\d.])(\d+) verifiers?\b")
 
 # --- suite metadata (hand-maintained; everything under `requirements` is derived) ---
 SUITE = {
@@ -145,6 +158,105 @@ def verifier_status_drift() -> list[str]:
     return problems
 
 
+def section_key(section: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in section.split("."))
+
+
+def fixture_sections() -> dict[str, int]:
+    """Count the fixtures per spec section, read from each fixture's spec references.
+
+    A fixture counts once for every distinct `§X.Y` its references open
+    with. The result is ordered by section number.
+    """
+    counts: dict[str, int] = {}
+    for path in fixture_paths():
+        fx = json.loads(path.read_text())
+        sections = set()
+        for ref in fx["spec"]:
+            match = SECTION_RE.match(ref["section"])
+            if match:
+                sections.add(match.group(1))
+        for section in sections:
+            counts[section] = counts.get(section, 0) + 1
+    return {s: counts[s] for s in sorted(counts, key=section_key)}
+
+
+def describe_groups(groups: dict[str, int]) -> str:
+    if not groups:
+        return "no fixture group"
+    return " and ".join(
+        f"{groups[s]} §{s} fixtures" for s in sorted(groups, key=section_key)
+    )
+
+
+def readme_version() -> str | None:
+    """Return the suite version README.md declares on its status line, or None."""
+    if not README.exists():
+        return None
+    match = README_VERSION_RE.search(README.read_text(encoding="utf-8"))
+    return match.group(1) if match else None
+
+
+def sibling_row_drift() -> list[str]:
+    """Compare this repository's sibling-repositories row in docs/ecosystem.md with the tree.
+
+    The row whose Repo cell reads `aip-conformance (this repo)` pins, by
+    hand, the suite version it opens with (`vX.Y:`), one `<count> §X.Y`
+    fixture group per spec section, and `<count> verifiers`. The version
+    must be the one README.md declares on its `**Status:` line, the groups
+    must be exactly the sections the fixtures cite with their fixture
+    counts, and the verifier count must equal the number of verifiers in
+    SUITE. Returns one message per missing row or per pinned value that
+    differs.
+    """
+    if not ECOSYSTEM.exists():
+        return ["docs/ecosystem.md missing"]
+    repo_cell = f"{SUITE['suite']} (this repo)"
+    status = None
+    for line in ECOSYSTEM.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 3 and cells[0].replace("`", "") == repo_cell:
+            status = cells[2]
+    if status is None:
+        return [f"docs/ecosystem.md: no sibling-repositories row for {repo_cell}"]
+
+    problems = []
+    declared = readme_version()
+    if declared is None:
+        problems.append("README.md: no `**Status: vX.Y` line to take the suite version from")
+    else:
+        match = SIBLING_VERSION_RE.match(status)
+        pinned = match.group(1) if match else None
+        if pinned != declared:
+            problems.append(
+                f"docs/ecosystem.md: {repo_cell} row pins "
+                f"{'v' + pinned if pinned else 'no version'}; README.md declares "
+                f"v{declared}, so the row must open with 'v{declared}:'"
+            )
+
+    expected_groups = fixture_sections()
+    pinned_groups = {
+        section: int(count) for count, section in SIBLING_GROUP_RE.findall(status)
+    }
+    if pinned_groups != expected_groups:
+        problems.append(
+            f"docs/ecosystem.md: {repo_cell} row pins {describe_groups(pinned_groups)}; "
+            f"the fixture set has {describe_groups(expected_groups)}"
+        )
+
+    verifiers = len(SUITE["verifiers"])
+    match = SIBLING_VERIFIERS_RE.search(status)
+    if match is None or int(match.group(1)) != verifiers:
+        problems.append(
+            f"docs/ecosystem.md: {repo_cell} row pins "
+            f"{match.group(0) if match else 'no verifier count'}; "
+            f"the suite has {verifiers} verifiers"
+        )
+    return problems
+
+
 def main() -> int:
     rendered = json.dumps(build(), indent=2, ensure_ascii=False) + "\n"
     if "--check" in sys.argv:
@@ -158,14 +270,14 @@ def main() -> int:
     else:
         OUT.write_text(rendered)
         print(f"wrote conformance.json ({len(build()['requirements'])} requirements)")
-    drift = verifier_status_drift()
+    drift = verifier_status_drift() + sibling_row_drift()
     for problem in drift:
         print(problem)
     if drift:
         return 1
     print(
-        "docs/ecosystem.md verifier status rows match the fixture set "
-        f"({len(fixture_paths())} fixtures)"
+        "docs/ecosystem.md verifier status rows and sibling row match the fixture set "
+        f"({len(fixture_paths())} fixtures) and README.md (v{readme_version()})"
     )
     return 0
 
