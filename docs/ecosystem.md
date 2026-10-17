@@ -7,8 +7,8 @@ specifications and issues it builds on.
 
 | Implementation | Verifier | Status |
 |---|---|---|
-| `opena2a-standards/aip-conformance/verifiers/go` (this repo) | Go, Ed25519 (standard library) | 4 / 4 PASS |
-| `opena2a-standards/aip-conformance/verifiers/python` (this repo) | Python, Ed25519 (`cryptography`) | 4 / 4 PASS |
+| `opena2a-standards/aip-conformance/verifiers/go` (this repo) | Go, Ed25519 (standard library) | 7 / 7 PASS |
+| `opena2a-standards/aip-conformance/verifiers/python` (this repo) | Python, Ed25519 (`cryptography`) | 7 / 7 PASS |
 
 Independent second-party implementations and cosigners are tracked in
 [`COSIGNERS.md`](../COSIGNERS.md) and on the sibling issue
