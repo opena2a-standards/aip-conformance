@@ -4,6 +4,13 @@
 // verifies the Ed25519 signature, and applies the AIP §5.1 step-5 checks
 // against the fixture's pinned verifierState.
 //
+// With no arguments it walks the fixture set embedded in the module root
+// (fixtures/*.json at this module version), so the published entry point
+//
+//	go run github.com/opena2a-standards/aip-conformance/verifiers/go@latest
+//
+// verifies the shipped fixtures without a checkout.
+//
 // Exit code is 0 if every fixture's observed result matches the expected
 // result AND the rejection category matches (when declared).
 //
@@ -20,12 +27,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
+
+	aipconformance "github.com/opena2a-standards/aip-conformance"
 )
 
 // ---------------------------------------------------------------------------
@@ -168,9 +180,9 @@ func composeTrustScore(c *TrustScoreComposition) compositionResult {
 	}
 }
 
-func runComposition(path string, f Fixture) bool {
+func runComposition(w io.Writer, path string, f Fixture) bool {
 	if f.TrustScoreComposition == nil || f.Expected.Composition == nil {
-		fmt.Printf("FAIL  %s\n       trustScoreComposition payload or expected.composition missing\n", path)
+		fmt.Fprintf(w, "FAIL  %s\n       trustScoreComposition payload or expected.composition missing\n", path)
 		return false
 	}
 	exp := f.Expected.Composition
@@ -208,7 +220,7 @@ func runComposition(path string, f Fixture) bool {
 	if !ok {
 		gate = "FAIL"
 	}
-	fmt.Printf("%s  %s\n       expected: %s\n       observed: %s\n", gate, path, expectedDetail, observedDetail)
+	fmt.Fprintf(w, "%s  %s\n       expected: %s\n       observed: %s\n", gate, path, expectedDetail, observedDetail)
 	return ok
 }
 
@@ -354,44 +366,96 @@ func lookupAgentBinding(vs VerifierState, agentDID string) (AgentBinding, bool) 
 // ---------------------------------------------------------------------------
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: verify <fixture-dir-or-file> [...]")
-		os.Exit(2)
-	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	paths := collectFixturePaths(os.Args[1:])
+// embeddedFixtureDir is the directory of the module root that fixtures.go
+// embeds; embedded fixtures are reported under this module-relative path.
+const embeddedFixtureDir = "fixtures"
+
+// run verifies the fixtures named by args (directories or files) and returns
+// the process exit code: 0 when every fixture passes, 1 when one or more
+// fail, 2 when the arguments name no fixture file. With no args it walks the
+// fixture set embedded in the module root instead, after one line naming
+// the module and version those fixtures came from.
+func run(args []string, stdout, stderr io.Writer) int {
+	var (
+		paths []string
+		read  func(string) ([]byte, error)
+	)
+	if len(args) == 0 {
+		paths = embeddedFixturePaths()
+		read = func(p string) ([]byte, error) { return fs.ReadFile(aipconformance.Fixtures, p) }
+		fmt.Fprintf(stdout, "fixtures: %d embedded in %s\n", len(paths), moduleIdentity())
+	} else {
+		paths = collectFixturePaths(args, stderr)
+		read = readFixtureFile
+	}
 	if len(paths) == 0 {
-		fmt.Fprintln(os.Stderr, "no fixtures found")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "no fixtures found")
+		return 2
 	}
 
 	pass, fail := 0, 0
 	for _, p := range paths {
-		ok := runFixture(p)
-		if ok {
+		if runFixture(stdout, p, read) {
 			pass++
 		} else {
 			fail++
 		}
 	}
-	fmt.Printf("\nsummary: %d pass, %d fail (%d fixtures)\n", pass, fail, len(paths))
+	fmt.Fprintf(stdout, "\nsummary: %d pass, %d fail (%d fixtures)\n", pass, fail, len(paths))
 	if fail > 0 {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
-func collectFixturePaths(args []string) []string {
+// embeddedFixturePaths lists the fixture files embedded in the module root,
+// sorted by path like the on-disk walk.
+func embeddedFixturePaths() []string {
+	matches, err := fs.Glob(aipconformance.Fixtures, embeddedFixtureDir+"/*.json")
+	if err != nil {
+		return nil
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+// moduleIdentity names the module and version this binary was built from, so
+// a run over the embedded fixtures records which published fixture set it
+// verified. A build without version stamping reports the module path alone.
+func moduleIdentity() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok || bi.Main.Path == "" {
+		return "this build"
+	}
+	if bi.Main.Version == "" {
+		return bi.Main.Path
+	}
+	return bi.Main.Path + " " + bi.Main.Version
+}
+
+// readFixtureFile reads a fixture named on the command line. The path
+// originates from os.Args (operator-supplied fixture file/dir); this is a
+// standalone CLI verifier with no network/request surface, so no untrusted
+// taint.
+func readFixtureFile(path string) ([]byte, error) {
+	return os.ReadFile(path) //nolint:gosec // G304: operator-supplied CLI arg, not request-derived
+}
+
+func collectFixturePaths(args []string, stderr io.Writer) []string {
 	var out []string
 	for _, a := range args {
 		info, err := os.Stat(a) //nolint:gosec // G703: operator-supplied CLI arg, not request-derived
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cannot stat %s: %v\n", a, err)
+			fmt.Fprintf(stderr, "cannot stat %s: %v\n", a, err)
 			continue
 		}
 		if info.IsDir() {
 			matches, err := filepath.Glob(filepath.Join(a, "*.json"))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "glob %s: %v\n", a, err)
+				fmt.Fprintf(stderr, "glob %s: %v\n", a, err)
 				continue
 			}
 			out = append(out, matches...)
@@ -403,29 +467,29 @@ func collectFixturePaths(args []string) []string {
 	return out
 }
 
-func runFixture(path string) bool {
-	// path originates from os.Args[1:] (operator-supplied fixture file/dir); this is a
-	// standalone CLI verifier with no network/request surface, so no untrusted taint.
-	b, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied CLI arg, not request-derived
+// runFixture verifies one fixture, read through read (a file on disk or an
+// embedded entry), and reports its PASS or FAIL block on w.
+func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) bool {
+	b, err := read(path)
 	if err != nil {
-		fmt.Printf("FAIL  %s\n       read error: %v\n", path, err)
+		fmt.Fprintf(w, "FAIL  %s\n       read error: %v\n", path, err)
 		return false
 	}
 	var f Fixture
 	if err := json.Unmarshal(b, &f); err != nil {
-		fmt.Printf("FAIL  %s\n       parse error: %v\n", path, err)
+		fmt.Fprintf(w, "FAIL  %s\n       parse error: %v\n", path, err)
 		return false
 	}
 
 	if f.FixtureType == "trustScoreComposition" {
-		return runComposition(path, f)
+		return runComposition(w, path, f)
 	}
 	if f.FixtureType != "challengeResponse" {
-		fmt.Printf("SKIP  %s\n       fixtureType=%s (this verifier handles challengeResponse and trustScoreComposition)\n", path, f.FixtureType)
+		fmt.Fprintf(w, "SKIP  %s\n       fixtureType=%s (this verifier handles challengeResponse and trustScoreComposition)\n", path, f.FixtureType)
 		return true
 	}
 	if f.ChallengeResponse == nil {
-		fmt.Printf("FAIL  %s\n       challengeResponse payload missing\n", path)
+		fmt.Fprintf(w, "FAIL  %s\n       challengeResponse payload missing\n", path)
 		return false
 	}
 
@@ -437,26 +501,26 @@ func runFixture(path string) bool {
 	}
 
 	if r.verdict != expected {
-		fmt.Printf("FAIL  %s\n       expected: %s%s\n       observed: %s\n",
+		fmt.Fprintf(w, "FAIL  %s\n       expected: %s%s\n       observed: %s\n",
 			path, expected, formatExpectedReject(f.Expected), observedDetail)
 		return false
 	}
 
 	if expected == "REJECT" && f.Expected.RejectCategory != "" && r.rejectCategory != f.Expected.RejectCategory {
-		fmt.Printf("FAIL  %s\n       expected: REJECT [%s]\n       observed: REJECT [%s: %s]\n",
+		fmt.Fprintf(w, "FAIL  %s\n       expected: REJECT [%s]\n       observed: REJECT [%s: %s]\n",
 			path, f.Expected.RejectCategory, r.rejectCategory, r.reason)
 		return false
 	}
 	if expected == "REJECT" && f.Expected.ReasonContains != "" && !strings.Contains(strings.ToLower(r.reason), strings.ToLower(f.Expected.ReasonContains)) {
-		fmt.Printf("FAIL  %s\n       expected reason to contain: %q\n       observed reason: %s\n",
+		fmt.Fprintf(w, "FAIL  %s\n       expected reason to contain: %q\n       observed reason: %s\n",
 			path, f.Expected.ReasonContains, r.reason)
 		return false
 	}
 
-	fmt.Printf("PASS  %s\n       expected: %s%s\n       observed: %s\n",
+	fmt.Fprintf(w, "PASS  %s\n       expected: %s%s\n       observed: %s\n",
 		path, expected, formatExpectedReject(f.Expected), observedDetail)
 	if r.signaturesNote != "" {
-		fmt.Printf("       %s\n", r.signaturesNote)
+		fmt.Fprintf(w, "       %s\n", r.signaturesNote)
 	}
 	return true
 }

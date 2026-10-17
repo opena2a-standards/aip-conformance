@@ -130,11 +130,13 @@ README.md                        the README: overview and verifier commands
 MANIFEST.sha256                  per-fixture SHA-256 (path-sorted)
 COSIGNERS.md                     second-party cosigner registry
 conformance.json                 requirement-to-fixture profile (generated)
+go.mod                           Go module root; `go run .../verifiers/go@latest` resolves here
+fixtures.go                      embeds fixtures/*.json into the Go verifier's no-argument run
 docs/                            reference pages, this one included
 fixtures/                        conformance fixtures (byte-stable JSON)
 vectors/                         test keypair vectors (TEST-ONLY)
 schemas/                         vendored AIP-SPEC JSON schemas (drift-gated)
-verifiers/go/                    Go reference verifier (Ed25519 stdlib)
+verifiers/go/                    Go reference verifier (Ed25519 stdlib), the published entry point
 verifiers/python/                Python reference verifier (Ed25519 cryptography)
 scripts/generate-fixtures/       deterministic fixture generator (Go)
 scripts/parity/                  Go/Python verifier parity gate
