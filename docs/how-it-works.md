@@ -73,10 +73,11 @@ publicly known and MUST NOT be used in production.
 ## Continuous verification
 
 [`.github/workflows/conformance.yml`](../.github/workflows/conformance.yml)
-enforces every claim in this README on each push and pull request:
+runs the gates below on pull requests and on pushes to `main`; the
+[README](../README.md#continuous-verification) summarizes them:
 
 1. Both reference verifiers run against `fixtures/` and must report
-   `4 pass, 0 fail`.
+   `0 fail`.
 2. The fixture generator re-runs and the committed fixture bytes plus
    `MANIFEST.sha256` must reproduce exactly (byte-pin).
 3. The cross-implementation parity gate
@@ -93,10 +94,12 @@ enforces every claim in this README on each push and pull request:
 
 ## Expected output
 
-Both verifiers report `summary: 4 pass, 0 fail (4 fixtures)` against the
-shipped fixture set. Any divergence on bytes (the fixture file was
-modified) or on verifier semantics (the verifier has drifted from the
-canonical signing form) shows up as one or more FAIL lines.
+Both verifiers report `summary: N pass, 0 fail (N fixtures)` against the
+shipped fixture set, N being the number of `*.json` files in `fixtures/`
+(sample run: [README](../README.md#running-the-verifiers)). Any divergence
+on bytes (the fixture file was modified) or on verifier semantics (the
+verifier has drifted from the canonical signing form) shows up as one or
+more FAIL lines.
 
 ## Reproducing the fixtures
 
@@ -118,12 +121,19 @@ The generator:
 
 ```
 LICENSE                          Apache 2.0
-README.md                        this file
+README.md                        the README: overview and verifier commands
 MANIFEST.sha256                  per-fixture SHA-256 (path-sorted)
 COSIGNERS.md                     second-party cosigner registry
-fixtures/                        the 4 conformance fixtures (byte-stable JSON)
+conformance.json                 requirement-to-fixture profile (generated)
+docs/                            reference pages, this one included
+fixtures/                        conformance fixtures (byte-stable JSON)
 vectors/                         test keypair vectors (TEST-ONLY)
+schemas/                         vendored AIP-SPEC JSON schemas (drift-gated)
 verifiers/go/                    Go reference verifier (Ed25519 stdlib)
 verifiers/python/                Python reference verifier (Ed25519 cryptography)
 scripts/generate-fixtures/       deterministic fixture generator (Go)
+scripts/parity/                  Go/Python verifier parity gate
+scripts/conformance_profile.py   writes conformance.json; --check gates drift
+scripts/schema_validation.py     validates fixture transcripts against schemas/
+scripts/docs_check.py            checks docs fixture counts and this layout
 ```
