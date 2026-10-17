@@ -84,7 +84,12 @@ runs the gates below on pull requests and on pushes to `main`; the
    ([`scripts/parity/parity.py`](../scripts/parity/parity.py)) asserts the Go
    and Python verifiers agree per fixture on gate status, verdict, and
    reject category, and publishes `parity-report.json` as a CI artifact.
-4. `conformance.json` and the verifier status rows in `docs/ecosystem.md` must match the fixture set.
+4. `conformance.json` and the rows about this repository in
+   `docs/ecosystem.md` must match the fixture set
+   ([`scripts/conformance_profile.py --check`](../scripts/conformance_profile.py)):
+   the verifier status rows, and the sibling-repositories row's version (the
+   one the README status line declares), fixture count per spec section and
+   verifier count.
 5. Schema validation
    ([`scripts/schema_validation.py`](../scripts/schema_validation.py)): every
    fixture's `challengeResponse.challenge` / `.response` must validate against
