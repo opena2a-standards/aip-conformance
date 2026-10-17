@@ -125,36 +125,38 @@ def verifier_status_drift() -> list[str]:
     Implementation cell names the verifier path and says `(this repo)`, and
     whose Status cell reads `<pass> / <total> PASS`. CI runs every verifier
     over every fixture and fails on any FAIL line, so the only current value
-    for that cell is `N / N PASS` with N the number of fixtures. Returns one
-    message per missing row or per row that pins a different number.
+    for that cell is `N / N PASS` with N the number of fixtures. Every such
+    row is compared, so a second row for the same verifier cannot hide a
+    stale one. Returns one message per missing row or per row that pins a
+    different number.
     """
     expected = len(fixture_paths())
     if not ECOSYSTEM.exists():
         return ["docs/ecosystem.md missing"]
-    status_by_path: dict[str, str] = {}
-    for line in ECOSYSTEM.read_text(encoding="utf-8").splitlines():
+    rows_by_path: dict[str, list[tuple[int, str]]] = {
+        verifier["path"]: [] for verifier in SUITE["verifiers"]
+    }
+    for lineno, line in enumerate(ECOSYSTEM.read_text(encoding="utf-8").splitlines(), 1):
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) != 3 or "(this repo)" not in cells[0]:
             continue
-        for verifier in SUITE["verifiers"]:
-            if verifier["path"] in cells[0]:
-                status_by_path[verifier["path"]] = cells[2]
+        for path, rows in rows_by_path.items():
+            if path in cells[0]:
+                rows.append((lineno, cells[2]))
     problems = []
-    for verifier in SUITE["verifiers"]:
-        path = verifier["path"]
-        status = status_by_path.get(path)
-        if status is None:
+    for path, rows in rows_by_path.items():
+        if not rows:
             problems.append(f"docs/ecosystem.md: no status row for {path}")
-            continue
-        match = STATUS_RE.match(status)
-        if not match or int(match.group(1)) != expected or int(match.group(2)) != expected:
-            problems.append(
-                f"docs/ecosystem.md: {path} status reads {status!r}; "
-                f"the fixture set has {expected} fixtures, so the row must read "
-                f"'{expected} / {expected} PASS'"
-            )
+        for lineno, status in rows:
+            match = STATUS_RE.match(status)
+            if not match or int(match.group(1)) != expected or int(match.group(2)) != expected:
+                problems.append(
+                    f"docs/ecosystem.md:{lineno}: {path} status reads {status!r}; "
+                    f"the fixture set has {expected} fixtures, so the row must read "
+                    f"'{expected} / {expected} PASS'"
+                )
     return problems
 
 

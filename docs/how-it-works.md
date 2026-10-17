@@ -141,4 +141,5 @@ scripts/parity/                  Go/Python verifier parity gate
 scripts/conformance_profile.py   writes conformance.json; --check gates drift
 scripts/schema_validation.py     validates fixture transcripts against schemas/
 scripts/docs_check.py            checks docs fixture counts and this layout
+tests/                           tests for scripts/conformance_profile.py (unittest)
 ```
