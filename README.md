@@ -11,19 +11,33 @@ is covered transitively via
 
 ## Running the verifiers
 
+The Go verifier is published as part of this repository's Go module, with
+the fixture set built in. With Go 1.22 or later installed, one command
+verifies the shipped fixtures and needs no clone:
+
+```bash
+go run github.com/opena2a-standards/aip-conformance/verifiers/go@latest
+```
+
+The first output line names the module version the fixtures came from,
+then one block per fixture and a summary:
+
+```text
+PASS  fixtures/challenge-response-replay.json
+       expected: REJECT [NONCE_REPLAY]
+       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]
+...
+summary: 7 pass, 0 fail (7 fixtures)
+```
+
+Pass directories or files to verify fixtures on disk instead, for example
+`./fixtures` in a checkout. Each verifier also runs from a checkout:
+
 ### Go
 
 ```bash
 cd verifiers/go
 go run . ../../fixtures
-```
-
-```text
-PASS  ../../fixtures/challenge-response-replay.json
-       expected: REJECT [NONCE_REPLAY]
-       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]
-...
-summary: 7 pass, 0 fail (7 fixtures)
 ```
 
 Depends on:
@@ -45,9 +59,10 @@ Depends on:
 - `cryptography >= 42.0.0`
 
 Both verifiers walk every `*.json` file in the directory you point them at
-(or you may pass individual fixture files). Exit code is 0 if every
-fixture's observed result matches the expected result and the rejection
-category matches (when declared).
+(or you may pass individual fixture files); with no argument, the Go
+verifier walks the copy of `fixtures/` built into it. Exit code is 0 if
+every fixture's observed result matches the expected result and the
+rejection category matches (when declared).
 
 ## Fixtures
 
