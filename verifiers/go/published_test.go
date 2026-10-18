@@ -53,14 +53,14 @@ type publishedRepository struct {
 // -short.
 func stagePublishedRepository(t *testing.T) *publishedRepository {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("fetches, builds and runs the module through the go command; skipped with -short")
-	}
-	for _, tool := range []string{"git", "go"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is not on PATH: %v", tool, err)
-		}
-	}
+	return stagePublishedRepositoryFrom(t, filepath.Join("..", ".."))
+}
+
+// stagePublishedRepositoryFrom is stagePublishedRepository for the checkout
+// at the path checkout.
+func stagePublishedRepositoryFrom(t *testing.T, checkout string) *publishedRepository {
+	t.Helper()
+	skipUnlessStaging(t)
 
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "aip.git")
@@ -102,7 +102,14 @@ func stagePublishedRepository(t *testing.T) *publishedRepository {
 	cmd := exec.Command("git", "init", "--quiet", "--bare")
 	cmd.Env = bareEnv
 	mustSucceed(t, cmd)
-	cmd = exec.Command("git", "fetch", "--quiet", "--no-tags", "../..", "HEAD:refs/heads/main")
+	// The fetch runs in the checkout and names it ".", which keeps the path
+	// off the command line (gosec G204). --update-shallow takes HEAD from a
+	// shallow checkout, such as a `git clone --depth=1`, and makes the bare
+	// repository shallow too. Without it git rejects refs/heads/main from a
+	// shallow checkout ("shallow roots are not allowed to be updated") and
+	// still exits 0, which leaves no main for the tag below.
+	cmd = exec.Command("git", "fetch", "--quiet", "--no-tags", "--update-shallow", ".", "HEAD:refs/heads/main")
+	cmd.Dir = checkout
 	cmd.Env = bareEnv
 	mustSucceed(t, cmd)
 	cmd = exec.Command("git", "symbolic-ref", "HEAD", "refs/heads/main")
@@ -113,6 +120,20 @@ func stagePublishedRepository(t *testing.T) *publishedRepository {
 	cmd.Env = bareEnv
 	mustSucceed(t, cmd)
 	return repo
+}
+
+// skipUnlessStaging skips a test that stages the repository when it runs
+// under -short or when git or go is not on PATH.
+func skipUnlessStaging(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("fetches, builds and runs the module through the go command; skipped with -short")
+	}
+	for _, tool := range []string{"git", "go"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not on PATH: %v", tool, err)
+		}
+	}
 }
 
 // fileURL returns the file:// URL of an absolute path.
@@ -174,6 +195,43 @@ func assertPublishedRun(t *testing.T, stdout, stderr string) {
 func TestPublishedCommandRunsTheCommittedTree(t *testing.T) {
 	repo := stagePublishedRepository(t)
 	cmd := exec.Command("go", "run", publishedModule+"/verifiers/go@"+publishedVersion)
+	stdout, stderr, err := repo.run(cmd, repo.env)
+	if err != nil {
+		t.Fatalf("%s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(cmd.Args, " "), err, stdout, stderr)
+	}
+	assertPublishedRun(t, stdout, stderr)
+}
+
+// TestPublishedCommandRunsFromAShallowCheckout runs the README's first
+// command against a repository staged from a shallow one: a bare repository
+// holding HEAD of the checkout at depth 1, the history a
+// `git clone --depth=1` leaves. A full checkout tests the shallow case too.
+func TestPublishedCommandRunsFromAShallowCheckout(t *testing.T) {
+	skipUnlessStaging(t)
+	shallow := filepath.Join(t.TempDir(), "shallow.git")
+	shallowEnv := append(os.Environ(),
+		"GIT_DIR="+shallow,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
+	cmd := exec.Command("git", "init", "--quiet", "--bare")
+	cmd.Env = shallowEnv
+	mustSucceed(t, cmd)
+	cmd = exec.Command("git", "fetch", "--quiet", "--no-tags", "--depth=1", ".", "HEAD:refs/heads/main")
+	cmd.Dir = filepath.Join("..", "..")
+	cmd.Env = shallowEnv
+	mustSucceed(t, cmd)
+	cmd = exec.Command("git", "symbolic-ref", "HEAD", "refs/heads/main")
+	cmd.Env = shallowEnv
+	mustSucceed(t, cmd)
+	cmd = exec.Command("git", "rev-parse", "--is-shallow-repository")
+	cmd.Env = shallowEnv
+	if got := strings.TrimSpace(mustSucceed(t, cmd)); got != "true" {
+		t.Fatalf("git fetch --depth=1 left a repository that is not shallow: git rev-parse --is-shallow-repository printed %q", got)
+	}
+
+	repo := stagePublishedRepositoryFrom(t, shallow)
+	cmd = exec.Command("go", "run", publishedModule+"/verifiers/go@"+publishedVersion)
 	stdout, stderr, err := repo.run(cmd, repo.env)
 	if err != nil {
 		t.Fatalf("%s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(cmd.Args, " "), err, stdout, stderr)
