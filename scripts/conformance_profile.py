@@ -14,6 +14,12 @@ spec section and a verifier count. Both modes also compare those rows with
 the fixture set, the verifier list and the version README.md declares on its
 status line, and exit 1 when a row pins a different value.
 
+The other rows of the sibling-repositories table describe suites this
+repository holds no copy of, so no count they pin can be checked here. Both
+modes exit 1 when one of those rows holds a standalone number followed, in
+the same clause, by `fixtures` or `verifiers` (`8 fixtures`, `25 conformance
+fixtures`, `2 verifiers`; PINNED_COUNT_RE has the exact form).
+
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
     python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or an ecosystem.md row is stale
@@ -41,6 +47,17 @@ SECTION_RE = re.compile(r"^§(\d+(?:\.\d+)*)")
 SIBLING_VERSION_RE = re.compile(r"^v(\d+(?:\.\d+)+):")
 SIBLING_GROUP_RE = re.compile(r"(?<![\d.])(\d+) §(\d+(?:\.\d+)*)")
 SIBLING_VERIFIERS_RE = re.compile(r"(?<![\d.])(\d+) verifiers?\b")
+# The heading of the sibling-repositories table in docs/ecosystem.md.
+SIBLINGS_HEADING = "## Sibling repositories"
+# A fixture or verifier count in another sibling's row: a number that does
+# not continue a word, path, hyphenated name, `§X.Y` reference or version,
+# followed by `fixtures` or `verifiers` before the next comma, semicolon,
+# parenthesis or cell border.
+PINNED_COUNT_RE = re.compile(
+    r"(?<![\w.§/-])\d+[^,;()|]*?\b(?:fixtures?|verifiers?)\b", re.IGNORECASE
+)
+# A markdown link, reduced to its text when a row's Repo cell is named.
+LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 
 # --- suite metadata (hand-maintained; everything under `requirements` is derived) ---
 SUITE = {
@@ -259,6 +276,46 @@ def sibling_row_drift() -> list[str]:
     return problems
 
 
+def other_sibling_row_counts() -> list[str]:
+    """Report the fixture and verifier counts the other sibling rows pin.
+
+    Every row of the sibling-repositories table in docs/ecosystem.md other
+    than `aip-conformance (this repo)` describes a suite this repository
+    holds no copy of, so nothing here can tell whether a count in that row
+    is current. Such a row pins no count: it names the sibling's verifiers
+    and leaves the fixture count to the sibling's README. Returns one
+    message per row that holds a count PINNED_COUNT_RE matches, and one if
+    the table's heading is missing.
+    """
+    if not ECOSYSTEM.exists():
+        return ["docs/ecosystem.md missing"]
+    repo_cell = f"{SUITE['suite']} (this repo)"
+    in_section = found = False
+    problems = []
+    for lineno, line in enumerate(ECOSYSTEM.read_text(encoding="utf-8").splitlines(), 1):
+        if line.startswith("## "):
+            in_section = line.strip() == SIBLINGS_HEADING
+            found = found or in_section
+            continue
+        if not in_section or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        name = LINK_RE.sub(r"\1", cells[0]).replace("`", "")
+        if name == repo_cell:
+            continue
+        counts = [match.group(0) for match in PINNED_COUNT_RE.finditer(line)]
+        if counts:
+            problems.append(
+                f"docs/ecosystem.md:{lineno}: {name} row pins "
+                f"{', '.join(repr(count) for count in counts)}; this repository holds "
+                "no copy of that suite to check a count against, so the row must pin "
+                "none: name its verifiers and leave the fixture count to its README"
+            )
+    if not found:
+        problems.append(f"docs/ecosystem.md: no '{SIBLINGS_HEADING}' section")
+    return problems
+
+
 def main() -> int:
     rendered = json.dumps(build(), indent=2, ensure_ascii=False) + "\n"
     if "--check" in sys.argv:
@@ -272,14 +329,15 @@ def main() -> int:
     else:
         OUT.write_text(rendered)
         print(f"wrote conformance.json ({len(build()['requirements'])} requirements)")
-    drift = verifier_status_drift() + sibling_row_drift()
+    drift = verifier_status_drift() + sibling_row_drift() + other_sibling_row_counts()
     for problem in drift:
         print(problem)
     if drift:
         return 1
     print(
         "docs/ecosystem.md verifier status rows and sibling row match the fixture set "
-        f"({len(fixture_paths())} fixtures) and README.md (v{readme_version()})"
+        f"({len(fixture_paths())} fixtures) and README.md (v{readme_version()}); "
+        "the other sibling rows pin no '<n> fixtures' or '<n> verifiers' count"
     )
     return 0
 
