@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Regression tests for the docs/ecosystem.md status-row gate in
-scripts/conformance_profile.py.
+"""Regression tests for scripts/conformance_profile.py: the docs/ecosystem.md
+row gates and the command-line arguments.
 
-Each test writes an edited copy of docs/ecosystem.md to a temporary
-directory and points the gate at the copy, so the tracked doc is never
-modified.
+The gate tests write an edited copy of docs/ecosystem.md to a temporary
+directory and point the gates at the copy; the command-line tests point the
+script's output at a conformance.json path in a temporary directory. The
+tracked files are never modified.
 
 Usage:
     python3 -m unittest discover -s tests -v
@@ -16,6 +17,7 @@ import io
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +27,23 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import conformance_profile  # noqa: E402
 
 GO = "verifiers/go"
+ATX = "atx-conformance"
+ATP = "atp-conformance"
+SIBLINGS_HEADING = "## Sibling repositories"
+
+
+def run_check(lines: list[str], gate: Callable[[], list[str]]) -> tuple[list[str], int, str]:
+    """Run one gate, then `conformance_profile.py --check`, over an edited copy of the doc."""
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = Path(tmp) / "ecosystem.md"
+        doc.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.object(conformance_profile, "ECOSYSTEM", doc), mock.patch.object(
+            sys, "argv", ["conformance_profile.py", "--check"]
+        ), contextlib.redirect_stdout(out):
+            problems = gate()
+            code = conformance_profile.main()
+    return problems, code, out.getvalue()
 
 
 class StatusRowGateTest(unittest.TestCase):
@@ -44,16 +63,7 @@ class StatusRowGateTest(unittest.TestCase):
         )
 
     def run_gate(self, lines: list[str]) -> tuple[list[str], int, str]:
-        with tempfile.TemporaryDirectory() as tmp:
-            doc = Path(tmp) / "ecosystem.md"
-            doc.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            out = io.StringIO()
-            with mock.patch.object(conformance_profile, "ECOSYSTEM", doc), mock.patch.object(
-                sys, "argv", ["conformance_profile.py", "--check"]
-            ), contextlib.redirect_stdout(out):
-                drift = conformance_profile.verifier_status_drift()
-                code = conformance_profile.main()
-        return drift, code, out.getvalue()
+        return run_check(lines, conformance_profile.verifier_status_drift)
 
     def assert_stale_row_reported(self, lines: list[str], lineno: int) -> None:
         drift, code, out = self.run_gate(lines)
@@ -89,6 +99,143 @@ class StatusRowGateTest(unittest.TestCase):
         drift, code, _ = self.run_gate(lines)
         self.assertEqual(drift, [f"docs/ecosystem.md: no status row for {GO}"])
         self.assertEqual(code, 1)
+
+
+class SiblingCountGateTest(unittest.TestCase):
+    """The sibling-repositories rows for other suites pin no fixture or verifier count."""
+
+    def setUp(self) -> None:
+        self.lines = conformance_profile.ECOSYSTEM.read_text(encoding="utf-8").splitlines()
+
+    def row_index(self, repo: str) -> int:
+        return next(i for i, line in enumerate(self.lines) if line.startswith(f"| [`{repo}`]"))
+
+    def with_status(self, repo: str, status: str) -> list[str]:
+        """Return the doc lines with the Status cell of `repo`'s row replaced."""
+        lines = list(self.lines)
+        index = self.row_index(repo)
+        repo_cell, spec_cell, _ = lines[index].strip().strip("|").split("|")
+        lines[index] = f"|{repo_cell}|{spec_cell}| {status} |"
+        return lines
+
+    def run_gate(self, lines: list[str]) -> tuple[list[str], int, str]:
+        return run_check(lines, conformance_profile.other_sibling_row_counts)
+
+    def assert_reported(self, lines: list[str], lineno: int, repo: str, counts: list[str]) -> None:
+        problems, code, out = self.run_gate(lines)
+        pinned = ", ".join(repr(count) for count in counts)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(
+            problems[0].startswith(f"docs/ecosystem.md:{lineno}: {repo} row pins {pinned};"),
+            problems[0],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(problems[0], out)
+
+    def test_current_doc_passes(self) -> None:
+        problems, code, _ = self.run_gate(self.lines)
+        self.assertEqual(problems, [])
+        self.assertEqual(code, 0)
+
+    def test_stale_atx_row_is_reported(self) -> None:
+        lines = self.with_status(ATX, "8 fixtures, 2 verifiers, `MANIFEST.sha256` pinned")
+        self.assert_reported(lines, self.row_index(ATX) + 1, ATX, ["8 fixtures", "2 verifiers"])
+
+    def test_stale_atp_row_is_reported(self) -> None:
+        lines = self.with_status(
+            ATP,
+            "4 fixtures (discovery, trust-proof baseline, trust-proof hybrid, "
+            "Signed Tree Head), 2 verifiers, `MANIFEST.sha256` pinned",
+        )
+        self.assert_reported(lines, self.row_index(ATP) + 1, ATP, ["4 fixtures", "2 verifiers"])
+
+    def test_count_with_words_before_fixtures_is_reported(self) -> None:
+        lines = self.with_status(ATX, "25 conformance fixtures, Go and Python verifiers")
+        self.assert_reported(lines, self.row_index(ATX) + 1, ATX, ["25 conformance fixtures"])
+
+    def test_count_in_verifier_summary_is_reported(self) -> None:
+        lines = self.with_status(ATP, "verifiers report `summary: 14 pass, 0 fail (14 fixtures)`")
+        self.assert_reported(lines, self.row_index(ATP) + 1, ATP, ["14 fixtures"])
+
+    def test_added_sibling_row_is_checked(self) -> None:
+        lines = list(self.lines)
+        index = self.row_index(ATP) + 1
+        lines.insert(
+            index,
+            "| [`example-conformance`](https://example.org/example-conformance) "
+            "| Example v1 | 12 fixtures, Go and Python verifiers |",
+        )
+        self.assert_reported(lines, index + 1, "example-conformance", ["12 fixtures"])
+
+    def test_this_repo_row_is_left_to_its_own_gate(self) -> None:
+        row = next(
+            line for line in self.lines if line.startswith("| `aip-conformance` (this repo) |")
+        )
+        self.assertTrue(conformance_profile.PINNED_COUNT_RE.search(row), row)
+        problems, code, _ = self.run_gate(self.lines)
+        self.assertEqual(problems, [])
+        self.assertEqual(code, 0)
+
+    def test_section_refs_versions_and_digests_are_not_counts(self) -> None:
+        lines = self.with_status(
+            ATX, "Go and Python verifiers, `MANIFEST.sha256` pinned; covers AIP §6.4 for ATX v1.1"
+        )
+        problems, code, _ = self.run_gate(lines)
+        self.assertEqual(problems, [])
+        self.assertEqual(code, 0)
+
+    def test_missing_section_is_reported(self) -> None:
+        self.assertIn(SIBLINGS_HEADING, self.lines)
+        lines = ["## Sibling suites" if line == SIBLINGS_HEADING else line for line in self.lines]
+        problems, code, _ = self.run_gate(lines)
+        self.assertEqual(problems, [f"docs/ecosystem.md: no '{SIBLINGS_HEADING}' section"])
+        self.assertEqual(code, 1)
+
+
+class CommandLineTest(unittest.TestCase):
+    def run_main(self, *args: str) -> tuple[object, str, str, bool]:
+        """Run main() with `args`; return the exit code, stdout, stderr and
+        whether conformance.json was written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "conformance.json"
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(conformance_profile, "OUT", profile), mock.patch.object(
+                sys, "argv", ["conformance_profile.py", *args]
+            ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = conformance_profile.main()
+                except SystemExit as exit_:
+                    code = exit_.code
+            return code, out.getvalue(), err.getvalue(), profile.exists()
+
+    def test_no_argument_writes_the_profile(self) -> None:
+        code, out, _, written = self.run_main()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(written)
+        self.assertIn("wrote conformance.json", out)
+
+    def test_help_prints_the_usage_text_and_writes_nothing(self) -> None:
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                code, out, _, written = self.run_main(flag)
+                self.assertEqual(code, 0)
+                self.assertIn(conformance_profile.__doc__.strip(), out)
+                self.assertFalse(written)
+
+    def test_unrecognized_argument_prints_the_usage_and_exits_2(self) -> None:
+        for arg in ("--chekc", "--che", "check"):
+            with self.subTest(arg=arg):
+                code, out, err, written = self.run_main(arg)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                # The usage line's program name depends on how Python was
+                # started (3.14 names the interpreter under `-m`), and 3.14
+                # may color the line; color codes do not split the fragments
+                # matched here.
+                self.assertIn("usage: ", err)
+                self.assertIn("--check", err)
+                self.assertIn(f"unrecognized arguments: {arg}", err)
+                self.assertFalse(written)
 
 
 if __name__ == "__main__":

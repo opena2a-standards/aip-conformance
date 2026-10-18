@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -15,11 +16,30 @@ import (
 )
 
 // publishedModule is the module path a user types. The README's first command
-// is `go run <publishedModule>/verifiers/go@latest`, and the go command
-// resolves that package only when go.mod declares this exact path: the GitHub
-// repository is opena2a-standards/aip-conformance, so any other path makes the
-// published entry point fail with "module declares its path as ...".
+// is `go run <publishedModule>/verifiers/go@<publishedVersion>`, and the go
+// command resolves that package only when go.mod declares this exact path:
+// the GitHub repository is opena2a-standards/aip-conformance, so any other
+// path makes the published entry point fail with "module declares its path
+// as ...".
 const publishedModule = "github.com/opena2a-standards/aip-conformance"
+
+// publishedVersion is the module version the README's first command names:
+// the tag of the suite version the README's status line declares
+// (`**Status: vX.Y` is tag vX.Y.Z). The command names a version rather than
+// @latest because the public module proxy answers @latest and @main on the
+// verifiers/go path with the module that lived there before the entry point
+// was published, whose go.mod declares another path, and the go command
+// stops on that module before it tries the root module (measured 2026-10-18
+// through proxy.golang.org; the command with a version named ran every
+// fixture and exited 0).
+const publishedVersion = "v0.3.0"
+
+// statusVersion matches the suite version the README's status line declares,
+// as scripts/conformance_profile.py reads it.
+var statusVersion = regexp.MustCompile(`\*\*Status: (v\d+(?:\.\d+)+)`)
+
+// semverTag matches a release tag of the form vX.Y.Z.
+var semverTag = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
 // checkoutFixtures is the repository's fixtures/ directory, the set both
 // verifiers and CI walk; the test binary runs with verifiers/go as its
@@ -46,8 +66,8 @@ func TestModulePathIsThePublishedImportPath(t *testing.T) {
 		t.Fatal("debug.ReadBuildInfo returned no build info")
 	}
 	if bi.Main.Path != publishedModule {
-		t.Fatalf("main module path is %q, want %q so that `go run %s/verifiers/go@latest` resolves",
-			bi.Main.Path, publishedModule, publishedModule)
+		t.Fatalf("main module path is %q, want %q so that `go run %s/verifiers/go@%s` resolves",
+			bi.Main.Path, publishedModule, publishedModule, publishedVersion)
 	}
 }
 
@@ -65,14 +85,29 @@ func firstBashCommand(text string) string {
 	return strings.TrimSpace(rest)
 }
 
+// TestReadmeFirstCommandIsThePublishedEntryPoint pins the README's first
+// command to the published module path and version, and the version to a
+// release tag within the suite version the README's status line declares,
+// so the three move together.
 func TestReadmeFirstCommandIsThePublishedEntryPoint(t *testing.T) {
 	readme, err := os.ReadFile("../../README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "go run " + publishedModule + "/verifiers/go@latest"
+	want := "go run " + publishedModule + "/verifiers/go@" + publishedVersion
 	if got := firstBashCommand(string(readme)); got != want {
 		t.Fatalf("README's first command is %q, want %q", got, want)
+	}
+	if !semverTag.MatchString(publishedVersion) {
+		t.Fatalf("publishedVersion %q is not a release tag vX.Y.Z", publishedVersion)
+	}
+	m := statusVersion.FindSubmatch(readme)
+	if m == nil {
+		t.Fatal("README has no `**Status: vX.Y` line to take the suite version from")
+	}
+	if status := string(m[1]); !strings.HasPrefix(publishedVersion, status+".") {
+		t.Fatalf("the README's first command names %s; its status line declares %s, so the tag must be %s.<patch>",
+			publishedVersion, status, status)
 	}
 }
 

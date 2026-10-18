@@ -35,3 +35,12 @@ revision.
 - Existing fixtures are immutable once published. If a fixture needs to
   change semantically, it ships under a new name. This is what makes
   `MANIFEST.sha256` a useful regression check.
+- The Go module is tagged at each suite version the README's status line
+  declares (`**Status: vX.Y` is tag `vX.Y.Z`), and the README's first
+  command names that tag; a module version is an immutable fixture set.
+  Name a version rather than `@latest`: the public module proxy answers
+  `@latest` and `@main` on the `verifiers/go` path with the module that
+  lived there before the entry point was published, whose go.mod declares
+  another path, and the go command stops on that module before it tries
+  the root module (measured 2026-10-18 through proxy.golang.org; the same
+  command with a version named ran every fixture and exited 0).
