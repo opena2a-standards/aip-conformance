@@ -23,9 +23,14 @@ fixtures`, `2 verifiers`; PINNED_COUNT_RE has the exact form).
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
     python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or an ecosystem.md row is stale
+    python3 scripts/conformance_profile.py --help     # print this help and exit; writes nothing
+
+An unrecognized argument also writes nothing: it prints the usage line and
+an error to stderr and exits 2.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -317,8 +322,20 @@ def other_sibling_row_counts() -> list[str]:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="write nothing; exit 1 if the committed file or an ecosystem.md row is stale",
+    )
+    args = ap.parse_args()
+
     rendered = json.dumps(build(), indent=2, ensure_ascii=False) + "\n"
-    if "--check" in sys.argv:
+    if args.check:
         if not OUT.exists():
             print("conformance.json missing; run scripts/conformance_profile.py")
             return 1

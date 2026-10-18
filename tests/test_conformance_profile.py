@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Regression tests for the docs/ecosystem.md row gates in
-scripts/conformance_profile.py.
+"""Regression tests for scripts/conformance_profile.py: the docs/ecosystem.md
+row gates and the command-line arguments.
 
-Each test writes an edited copy of docs/ecosystem.md to a temporary
-directory and points the gates at the copy, so the tracked doc is never
-modified.
+The gate tests write an edited copy of docs/ecosystem.md to a temporary
+directory and point the gates at the copy; the command-line tests point the
+script's output at a conformance.json path in a temporary directory. The
+tracked files are never modified.
 
 Usage:
     python3 -m unittest discover -s tests -v
@@ -189,6 +190,52 @@ class SiblingCountGateTest(unittest.TestCase):
         problems, code, _ = self.run_gate(lines)
         self.assertEqual(problems, [f"docs/ecosystem.md: no '{SIBLINGS_HEADING}' section"])
         self.assertEqual(code, 1)
+
+
+class CommandLineTest(unittest.TestCase):
+    def run_main(self, *args: str) -> tuple[object, str, str, bool]:
+        """Run main() with `args`; return the exit code, stdout, stderr and
+        whether conformance.json was written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "conformance.json"
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(conformance_profile, "OUT", profile), mock.patch.object(
+                sys, "argv", ["conformance_profile.py", *args]
+            ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = conformance_profile.main()
+                except SystemExit as exit_:
+                    code = exit_.code
+            return code, out.getvalue(), err.getvalue(), profile.exists()
+
+    def test_no_argument_writes_the_profile(self) -> None:
+        code, out, _, written = self.run_main()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(written)
+        self.assertIn("wrote conformance.json", out)
+
+    def test_help_prints_the_usage_text_and_writes_nothing(self) -> None:
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                code, out, _, written = self.run_main(flag)
+                self.assertEqual(code, 0)
+                self.assertIn(conformance_profile.__doc__.strip(), out)
+                self.assertFalse(written)
+
+    def test_unrecognized_argument_prints_the_usage_and_exits_2(self) -> None:
+        for arg in ("--chekc", "--che", "check"):
+            with self.subTest(arg=arg):
+                code, out, err, written = self.run_main(arg)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                # The usage line's program name depends on how Python was
+                # started (3.14 names the interpreter under `-m`), and 3.14
+                # may color the line; color codes do not split the fragments
+                # matched here.
+                self.assertIn("usage: ", err)
+                self.assertIn("--check", err)
+                self.assertIn(f"unrecognized arguments: {arg}", err)
+                self.assertFalse(written)
 
 
 if __name__ == "__main__":
