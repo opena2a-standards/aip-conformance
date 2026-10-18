@@ -7,9 +7,10 @@
 // With no arguments it walks the fixture set embedded in the module root
 // (fixtures/*.json at this module version), so the published entry point
 //
-//	go run github.com/opena2a-standards/aip-conformance/verifiers/go@latest
+//	go run github.com/opena2a-standards/aip-conformance/verifiers/go@<version>
 //
-// verifies the shipped fixtures without a checkout.
+// verifies the shipped fixtures without a checkout. The README's first
+// command names the current suite version.
 //
 // Exit code is 0 if every fixture's observed result matches the expected
 // result AND the rejection category matches (when declared).

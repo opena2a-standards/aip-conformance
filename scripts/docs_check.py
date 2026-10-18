@@ -7,7 +7,8 @@ so this script recomputes both from the tree:
 1. Fixture counts in README.md and docs/*.md. A verifier summary
    (`N pass, M fail`, optionally followed by `(K fixtures)`) must add up to
    the number of `*.json` files in fixtures/, the same glob both verifiers
-   walk; `N conformance fixtures` must equal that number.
+   walk; `N conformance fixtures` and the Go verifier's first output line,
+   `fixtures: N embedded in`, must equal that number.
 2. The repository layout block in docs/how-it-works.md. Every tracked file
    outside dot-directories and dotfiles must sit under one of its entries,
    and every entry must name a tracked file or directory.
@@ -27,6 +28,7 @@ LAYOUT_DOC = REPO_ROOT / "docs" / "how-it-works.md"
 
 SUMMARY = re.compile(r"(\d+)\s+pass,\s+(\d+)\s+fail(?:\s+\((\d+)\s+fixtures?\))?")
 NAMED_COUNT = re.compile(r"(\d+)\s+conformance\s+fixtures?")
+EMBEDDED_COUNT = re.compile(r"fixtures:\s+(\d+)\s+embedded\s+in\b")
 LAYOUT_BLOCK = re.compile(r"^## Repository layout\n+```[^\n]*\n(.*?)^```", re.M | re.S)
 
 
@@ -53,9 +55,10 @@ def check_counts(fixture_count: int) -> list[str]:
                 total is not None and int(total) != fixture_count
             ):
                 problems.append((rel, text.count("\n", 0, m.start()) + 1, m[0]))
-        for m in NAMED_COUNT.finditer(text):
-            if int(m[1]) != fixture_count:
-                problems.append((rel, text.count("\n", 0, m.start()) + 1, m[0]))
+        for pattern in (NAMED_COUNT, EMBEDDED_COUNT):
+            for m in pattern.finditer(text):
+                if int(m[1]) != fixture_count:
+                    problems.append((rel, text.count("\n", 0, m.start()) + 1, m[0]))
     return [
         f"{rel}:{lineno}: `{' '.join(claim.split())}` does not match the "
         f"{fixture_count} fixtures in fixtures/"

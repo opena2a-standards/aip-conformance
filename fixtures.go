@@ -2,10 +2,11 @@
 // It carries the fixture set so the reference verifier at verifiers/go can run
 // it from the published module alone, with no checkout:
 //
-//	go run github.com/opena2a-standards/aip-conformance/verifiers/go@latest
+//	go run github.com/opena2a-standards/aip-conformance/verifiers/go@<version>
 //
-// The embedded bytes are the fixtures/*.json files committed at the module
-// version in use, the same files MANIFEST.sha256 pins.
+// The README's first command names the current suite version. The embedded
+// bytes are the fixtures/*.json files committed at the module version in
+// use, the same files MANIFEST.sha256 pins.
 package aipconformance
 
 import "embed"

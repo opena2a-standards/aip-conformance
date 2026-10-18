@@ -16,13 +16,15 @@ the fixture set built in. With Go 1.22 or later installed, one command
 verifies the shipped fixtures and needs no clone:
 
 ```bash
-go run github.com/opena2a-standards/aip-conformance/verifiers/go@latest
+go run github.com/opena2a-standards/aip-conformance/verifiers/go@v0.3.0
 ```
 
-The first output line names the module version the fixtures came from,
-then one block per fixture and a summary:
+The version is the suite version the status line declares, as a tag. The
+first output line repeats it with the module path, then one block per
+fixture follows and a summary:
 
 ```text
+fixtures: 7 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
 PASS  fixtures/challenge-response-replay.json
        expected: REJECT [NONCE_REPLAY]
        observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]
@@ -30,6 +32,8 @@ PASS  fixtures/challenge-response-replay.json
 summary: 7 pass, 0 fail (7 fixtures)
 ```
 
+Name the version: `@latest` does not reach the root module through the
+public module proxy ([why](docs/versioning.md#versioning-and-stability)).
 Pass directories or files to verify fixtures on disk instead, for example
 `./fixtures` in a checkout. Each verifier also runs from a checkout:
 
