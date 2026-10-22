@@ -15,6 +15,11 @@
 // Exit code is 0 if every fixture's observed result matches the expected
 // result AND the rejection category matches (when declared).
 //
+// Outside challengeResponse a fixture's members are read under their exact
+// names (VerifierState is not verifierState), and a fixture that writes one
+// member name twice in the same JSON object fails to load on both verifiers,
+// which counts as a fail (exit code 1).
+//
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 // VERBATIM:
@@ -23,6 +28,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,6 +39,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -125,6 +132,227 @@ type Fixture struct {
 	ChallengeResponse *ChallengeResponse `json:"challengeResponse,omitempty"`
 	// TrustScoreComposition is set on trustScoreComposition fixtures only.
 	TrustScoreComposition *TrustScoreComposition `json:"trustScoreComposition,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// fixture parsing (MUST match the Python verifier's load_fixture)
+// ---------------------------------------------------------------------------
+
+// protocolMessages names the fixture member that holds the protocol messages
+// under test. parseFixture leaves its value to encoding/json as written: it
+// is not walked for repeated member names, and its members are not narrowed
+// to their exact names. The Python verifier's _PROTOCOL_MESSAGES holds the
+// same name.
+var protocolMessages = map[string]bool{"challengeResponse": true}
+
+// protocolMessagesType is the decode target of the protocolMessages member.
+var protocolMessagesType = reflect.TypeOf(ChallengeResponse{})
+
+// parseFixture decodes a fixture file. A JSON object outside the value of
+// challengeResponse that writes one member name twice is a load error: the
+// verifier state or expected outcome it carries has no single reading, and
+// encoding/json would decode both copies into one struct, keeping a member
+// the later copy omits, where the Python verifier reads the later copy
+// alone. Outside challengeResponse each member is read under its exact name
+// (exactMembers). A file that is not JSON fails with the error json.Unmarshal
+// reports for it.
+func parseFixture(b []byte) (Fixture, error) {
+	var f Fixture
+	if json.Valid(b) {
+		if member, ok := repeatedMember("", b, protocolMessages); ok {
+			return f, fmt.Errorf("%s: duplicate member name", member)
+		}
+		b = exactMembers(b, reflect.TypeOf(f))
+	}
+	err := json.Unmarshal(b, &f)
+	return f, err
+}
+
+// repeatedMember returns the first member name, in document order, that a
+// JSON object in raw writes twice, and whether there is one. The member is
+// named object.member and array[index], and a top-level member with an empty
+// label by its bare name, as in verifierState.agentBindings[0].agentDid.
+// Names are compared after JSON unescaping, in which encoding/json decodes
+// an unpaired surrogate escape such as \ud800 to U+FFFD (the Python
+// verifier's _UNPAIRED_SURROGATE), and never folded, so VerifierState does
+// not repeat verifierState. The value of a member whose path is in skip is
+// not walked. raw is valid JSON.
+func repeatedMember(label string, raw []byte, skip map[string]bool) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// Without UseNumber, Token stops with an error at a number such as 1e400
+	// that does not fit a float64, and a repeat after it would go unseen.
+	dec.UseNumber()
+	member, found, _ := walkMembers(dec, label, skip)
+	return member, found
+}
+
+// walkMembers reads the next JSON value from dec for repeatedMember and
+// returns the first repeated member in it, and whether there is one.
+func walkMembers(dec *json.Decoder, label string, skip map[string]bool) (string, bool, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "", false, err
+	}
+	switch tok {
+	case json.Delim('{'):
+		seen := map[string]bool{}
+		for dec.More() {
+			if tok, err = dec.Token(); err != nil {
+				return "", false, err
+			}
+			name, _ := tok.(string)
+			path := name
+			if label != "" {
+				path = label + "." + name
+			}
+			if seen[name] {
+				return path, true, nil
+			}
+			seen[name] = true
+			if skip[path] {
+				var value json.RawMessage
+				err = dec.Decode(&value)
+			} else {
+				var member string
+				var found bool
+				if member, found, err = walkMembers(dec, path, skip); found {
+					return member, true, nil
+				}
+			}
+			if err != nil {
+				return "", false, err
+			}
+		}
+	case json.Delim('['):
+		for i := 0; dec.More(); i++ {
+			if member, found, err := walkMembers(dec, fmt.Sprintf("%s[%d]", label, i), skip); found || err != nil {
+				return member, found, err
+			}
+		}
+	default:
+		return "", false, nil
+	}
+	_, err = dec.Token() // the closing } or ]
+	return "", false, err
+}
+
+// exactMembers returns raw with each member of an object that decodes into a
+// struct left out unless its name is exactly the JSON name of one of the
+// struct's fields, walking raw along the decode target t (pointers, struct
+// fields, slice elements). encoding/json matches a member name to a field
+// case-insensitively, so on its own it decodes VerifierState as
+// verifierState; the Python verifier reads each member by its exact name, so
+// in both verifiers such a member is not the fixture member, which is then
+// absent. The value of challengeResponse (protocolMessagesType) is returned
+// as written. The members kept stay in document order. A value that is not
+// the JSON type t needs is returned unchanged, for the decode to reject.
+func exactMembers(raw json.RawMessage, t reflect.Type) json.RawMessage {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == protocolMessagesType {
+		return raw
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		members, ok := objectMembers(raw)
+		if !ok {
+			return raw
+		}
+		fields := map[string]reflect.Type{}
+		for i := 0; i < t.NumField(); i++ {
+			if name, decoded := memberName(t.Field(i)); decoded {
+				fields[name] = t.Field(i).Type
+			}
+		}
+		var kept []objectMember
+		for _, m := range members {
+			if ft, ok := fields[m.name]; ok {
+				kept = append(kept, objectMember{m.name, exactMembers(m.value, ft)})
+			}
+		}
+		return encodeObject(kept)
+	case reflect.Slice:
+		elems, ok := arrayElements(raw)
+		if !ok {
+			return raw
+		}
+		out := []byte{'['}
+		for i, elem := range elems {
+			if i > 0 {
+				out = append(out, ',')
+			}
+			out = append(out, exactMembers(elem, t.Elem())...)
+		}
+		return append(out, ']')
+	}
+	return raw
+}
+
+// memberName is the JSON member name encoding/json decodes into field, and
+// whether it decodes into field at all.
+func memberName(field reflect.StructField) (string, bool) {
+	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	if name == "" {
+		name = field.Name
+	}
+	return name, field.IsExported() && name != "-"
+}
+
+// objectMember is one member of a JSON object: its name and its raw value.
+type objectMember struct {
+	name  string
+	value json.RawMessage
+}
+
+// objectMembers returns the members of raw in document order when raw is a
+// JSON object.
+func objectMembers(raw json.RawMessage) ([]objectMember, bool) {
+	if !json.Valid(raw) {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	var members []objectMember
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		name, _ := tok.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, false
+		}
+		members = append(members, objectMember{name, value})
+	}
+	return members, true
+}
+
+// encodeObject writes members as a JSON object, in order.
+func encodeObject(members []objectMember) json.RawMessage {
+	out := []byte{'{'}
+	for i, m := range members {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		name, _ := json.Marshal(m.name)
+		out = append(out, name...)
+		out = append(out, ':')
+		out = append(out, m.value...)
+	}
+	return append(out, '}')
+}
+
+// arrayElements returns the elements of raw when it is a JSON array.
+func arrayElements(raw json.RawMessage) ([]json.RawMessage, bool) {
+	var elems []json.RawMessage
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '[' || json.Unmarshal(raw, &elems) != nil {
+		return nil, false
+	}
+	return elems, true
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +704,8 @@ func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) boo
 		fmt.Fprintf(w, "FAIL  %s\n       read error: %v\n", path, err)
 		return false
 	}
-	var f Fixture
-	if err := json.Unmarshal(b, &f); err != nil {
+	f, err := parseFixture(b)
+	if err != nil {
 		fmt.Fprintf(w, "FAIL  %s\n       parse error: %v\n", path, err)
 		return false
 	}

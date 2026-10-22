@@ -66,7 +66,10 @@ Both verifiers walk every `*.json` file in the directory you point them at
 (or you may pass individual fixture files); with no argument, the Go
 verifier walks the copy of `fixtures/` built into it. Exit code is 0 if
 every fixture's observed result matches the expected result and the
-rejection category matches (when declared).
+rejection category matches (when declared). Outside `challengeResponse`,
+both read a fixture's members under their exact names (`VerifierState` is
+not `verifierState`), and a fixture that writes one member name twice in
+the same JSON object fails to load, which counts as a fail (exit code 1).
 
 ## Fixtures
 

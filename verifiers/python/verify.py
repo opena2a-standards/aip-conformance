@@ -9,6 +9,11 @@ pinned verifierState.
 Exit code is 0 if every fixture's observed result matches the expected
 result AND the rejection category matches (when declared).
 
+Outside challengeResponse a fixture's members are read under their exact
+names (VerifierState is not verifierState), and a fixture that writes one
+member name twice in the same JSON object fails to load on both verifiers,
+which counts as a fail (exit code 1).
+
 Canonical signing form (5 fields, pipe-delimited) -- MUST mirror
 scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 VERBATIM:
@@ -20,11 +25,12 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Set, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -155,6 +161,93 @@ def _emit_rfc3339(dt: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
+# fixture loading (MUST match the Go verifier's parseFixture)
+# ---------------------------------------------------------------------------
+
+# The fixture member that holds the protocol messages under test. Its value is
+# not walked for repeated member names. The Go verifier's protocolMessages
+# holds the same name.
+_PROTOCOL_MESSAGES = frozenset({"challengeResponse"})
+
+# An unpaired UTF-16 surrogate, which json.loads keeps when a JSON string
+# escapes one with no partner beside it ("\ud800"). The Go verifier's
+# encoding/json decodes each to U+FFFD, so names that differ only there are
+# one name to it; _repeated_member compares and names members the same way.
+_UNPAIRED_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+class _JSONObject(dict):
+    """A JSON object as load_fixture reads it: the dict json.loads builds, in
+    which the last occurrence of a repeated member name wins, with pairs
+    holding every member in document order, repeats included."""
+
+    pairs: List[Tuple[str, Any]]
+
+    @classmethod
+    def from_pairs(cls, pairs: List[Tuple[str, Any]]) -> _JSONObject:
+        obj = cls(pairs)
+        obj.pairs = pairs
+        return obj
+
+
+def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> Optional[str]:
+    """The first member name, in document order, that a JSON object in value
+    writes twice, or None when no object repeats a name. The member is named
+    object.member and array[index], and a top-level member with an empty
+    label by its bare name, as the Go verifier's repeatedMember names it.
+    Names are compared as encoding/json unescapes them (_UNPAIRED_SURROGATE)
+    and never folded, so VerifierState does not repeat verifierState. The
+    value of a member whose path is in skip is not walked."""
+    # An explicit stack rather than recursion, so a deeply nested document
+    # cannot raise RecursionError here. Each entry walks one array or object:
+    # its path, an iterator over its (index or name, value) pairs, and the
+    # member names seen so far (None for an array).
+    stack: List[Tuple[str, Iterator[Tuple[Any, Any]], Optional[Set[str]]]] = []
+
+    def enter(path: str, item: Any) -> None:
+        if isinstance(item, list):
+            stack.append((path, iter(enumerate(item)), None))
+        elif isinstance(item, dict):
+            pairs = item.pairs if isinstance(item, _JSONObject) else item.items()
+            stack.append((path, iter(pairs), set()))
+
+    enter(label, value)
+    while stack:
+        path, members, seen = stack[-1]
+        step = next(members, None)
+        if step is None:
+            stack.pop()
+            continue
+        key, item = step
+        if seen is None:
+            item_path = f"{path}[{key}]"
+        else:
+            name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
+            item_path = f"{path}.{name}" if path else name
+            if name in seen:
+                return item_path
+            seen.add(name)
+        if item_path not in skip:
+            enter(item_path, item)
+    return None
+
+
+def load_fixture(path: Path) -> dict:
+    """Reads a fixture file. A JSON object outside the value of
+    challengeResponse that writes one member name twice raises ValueError
+    naming the member: the verifier state or expected outcome it carries has
+    no single reading, and json.loads would keep the later copy alone where
+    the Go verifier's encoding/json keeps a member the later copy omits.
+    Members are read under their exact names, as the Go verifier reads them
+    outside challengeResponse."""
+    f = json.loads(path.read_text(), object_pairs_hook=_JSONObject.from_pairs)
+    repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
+    if repeated is not None:
+        raise ValueError(f"{repeated}: duplicate member name")
+    return f
+
+
+# ---------------------------------------------------------------------------
 # fixture walking + reporting
 # ---------------------------------------------------------------------------
 
@@ -258,7 +351,7 @@ def run_composition(path: Path, f: dict) -> bool:
 
 def run_fixture(path: Path) -> bool:
     try:
-        f = json.loads(path.read_text())
+        f = load_fixture(path)
     except Exception as e:
         print(f"FAIL  {path}\n       parse error: {e}")
         return False
