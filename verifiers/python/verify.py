@@ -64,12 +64,13 @@ def canonical_challenge_response_payload(cb: dict) -> bytes:
 
 
 def _normalize_rfc3339(s: str) -> str:
-    # Python's datetime.fromisoformat handles "Z" only from 3.11+.
-    if s.endswith("Z"):
-        s2 = s[:-1] + "+00:00"
-    else:
-        s2 = s
-    dt = datetime.fromisoformat(s2).astimezone(timezone.utc)
+    try:
+        dt = _parse_rfc3339(s)
+    except ValueError:
+        # A value _parse_rfc3339 does not read, such as a date-time with no
+        # UTC offset, goes into the payload as written, as the Go verifier's
+        # normalizeRFC3339 returns a value time.Parse does not read.
+        return s
     # Re-emit as RFC 3339 with Z suffix (no microseconds), matching Go's
     # time.Format(time.RFC3339) on a UTC time.
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -187,7 +188,10 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
 
     # (3) Challenge not expired
     clock = _verifier_clock(vs)
-    expires_at = _parse_rfc3339(challenge["expiresAt"])
+    try:
+        expires_at = _parse_rfc3339(challenge["expiresAt"])
+    except ValueError as e:
+        return Result("REJECT", "CHALLENGE_EXPIRED", f"challenge.expiresAt is not RFC 3339: {e}")
     if not (clock < expires_at):
         return Result(
             "REJECT", "CHALLENGE_EXPIRED",
@@ -249,7 +253,17 @@ def _verifier_clock(vs: dict) -> datetime:
 
 
 def _parse_rfc3339(s: str) -> datetime:
-    return datetime.fromisoformat((s[:-1] + "+00:00") if s.endswith("Z") else s).astimezone(timezone.utc)
+    """s as a UTC datetime, or ValueError when datetime.fromisoformat does
+    not read s or s has no UTC offset. fromisoformat reads a date and time
+    with no offset, or a date alone, as a naive datetime, which astimezone
+    would take to be in the machine's local time zone. RFC 3339 requires
+    the offset, and the Go verifier's time.Parse does not read such a
+    value."""
+    # Python's datetime.fromisoformat handles "Z" only from 3.11+.
+    dt = datetime.fromisoformat((s[:-1] + "+00:00") if s.endswith("Z") else s)
+    if dt.tzinfo is None:
+        raise ValueError(f"{s!r} has no UTC offset")
+    return dt.astimezone(timezone.utc)
 
 
 def _emit_rfc3339(dt: datetime) -> str:
