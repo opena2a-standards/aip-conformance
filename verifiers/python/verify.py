@@ -14,6 +14,19 @@ names (VerifierState is not verifierState), and a fixture that writes one
 member name twice in the same JSON object fails to load on both verifiers,
 which counts as a fail (exit code 1).
 
+A file whose top-level value is not a JSON object fails to load. A
+challengeResponse fixture that carries its challengeResponse payload and no
+verifierState member, or whose verifierState holds a value that a check
+reads and cannot use (FixtureError lists them), prints a FAIL block naming
+the member:
+
+    FAIL  <path>
+           fixture error: verifierState.agentBindings[0].agentDid: missing
+
+Any other error raised while checking a fixture prints a FAIL block with
+the error's type and message. Each of these counts as a fail, and the run
+goes on to the next fixture and prints the summary line.
+
 Canonical signing form (5 fields, pipe-delimited) -- MUST mirror
 scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 VERBATIM:
@@ -79,8 +92,49 @@ class Result:
     signatures_note: str = ""
 
 
-def verify_challenge_response(cr: dict, vs: dict) -> Result:
-    """Apply the AIP §5.1 step-5 checks in order. First failing check wins."""
+class FixtureError(ValueError):
+    """A fixture member the verifier reads is missing or holds a value that
+    the check reading it cannot use. str() is "<member>: <problem>", with the
+    member named as _repeated_member names it, for example
+    "verifierState.agentBindings[0].agentDid: missing". It is raised for a
+    challengeResponse fixture that carries a challengeResponse payload and no
+    verifierState member, and by the §5.1 checks for verifierState and for
+    the agentBindings, publicKeyHex, clockRfc3339 and seenNonces members
+    they read from it. The checks read verifierState only after the
+    signature check passes."""
+
+    def __init__(self, member: str, problem: str) -> None:
+        super().__init__(f"{member}: {problem}")
+
+
+def _json_type(value: Any) -> str:
+    """The JSON type of a value json.loads returned, as a FAIL line names it."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    return "an object"
+
+
+def _member(obj: dict, label: str, name: str) -> Any:
+    """The value of the member name in obj, the JSON object named label (the
+    empty label for the top level), or FixtureError naming the member when
+    obj has no member of that name."""
+    if name not in obj:
+        raise FixtureError(f"{label}.{name}" if label else name, "missing")
+    return obj[name]
+
+
+def verify_challenge_response(cr: dict, vs: Any) -> Result:
+    """Apply the AIP §5.1 step-5 checks in order. First failing check wins.
+    vs is the fixture's verifierState; a member of it that a check reads and
+    cannot use raises FixtureError."""
 
     response = cr["response"]
     challenge = cr["challenge"]
@@ -112,20 +166,27 @@ def verify_challenge_response(cr: dict, vs: dict) -> Result:
                       "Ed25519 signature did not verify against the canonical 5-field payload")
 
     # (2) publicKey matches bound key for response.agentDid
-    bound = _lookup_agent_binding(vs, response["agentDid"])
-    if bound is None:
+    found = _lookup_agent_binding(vs, response["agentDid"])
+    if found is None:
         return Result("REJECT", "UNTRUSTED_KEY",
                       f"response.agentDid {response['agentDid']} has no agentBinding in verifierState")
+    binding, bound = found
+    bound_key = _member(bound, binding, "publicKeyHex")
     bound_pub_hex = pub_bytes.hex()
-    if bound_pub_hex != bound["publicKeyHex"]:
+    if bound_pub_hex != bound_key:
+        # The reason quotes bound_key[:16]. The slice raises for null, a
+        # boolean, a number or an object, so those are a fixture error; a
+        # string or an array slices, and the fixture is rejected here.
+        if not isinstance(bound_key, (str, list)):
+            raise FixtureError(f"{binding}.publicKeyHex", f"{_json_type(bound_key)}, not a string")
         return Result(
             "REJECT", "UNTRUSTED_KEY",
             f"response.publicKey does not match bound key for agentDid {response['agentDid']} "
-            f"(got {bound_pub_hex[:16]}..., bound is {bound['publicKeyHex'][:16]}...)",
+            f"(got {bound_pub_hex[:16]}..., bound is {bound_key[:16]}...)",
         )
 
     # (3) Challenge not expired
-    clock = _parse_rfc3339(vs["clockRfc3339"])
+    clock = _verifier_clock(vs)
     expires_at = _parse_rfc3339(challenge["expiresAt"])
     if not (clock < expires_at):
         return Result(
@@ -135,7 +196,14 @@ def verify_challenge_response(cr: dict, vs: dict) -> Result:
 
     # (4) Nonce not in seenNonces
     seen = vs.get("seenNonces") or []
-    if response["nonce"] in seen:
+    try:
+        replayed = response["nonce"] in seen
+    except TypeError:
+        # The lookup raises when seenNonces is true or a number other than
+        # 0, a non-empty string and the nonce is not a string, or a
+        # non-empty object and the nonce is an array or an object.
+        raise FixtureError("verifierState.seenNonces", f"{_json_type(seen)}, not an array") from None
+    if replayed:
         return Result("REJECT", "NONCE_REPLAY",
                       "response.nonce was already seen by the verifier")
 
@@ -145,11 +213,39 @@ def verify_challenge_response(cr: dict, vs: dict) -> Result:
     )
 
 
-def _lookup_agent_binding(vs: dict, agent_did: str) -> Optional[dict]:
-    for b in vs.get("agentBindings") or []:
-        if b["agentDid"] == agent_did:
-            return b
+def _lookup_agent_binding(vs: Any, agent_did: Any) -> Optional[Tuple[str, dict]]:
+    """The first verifierState.agentBindings entry whose agentDid is
+    agent_did, with the member name of that entry, or None when no entry is.
+    An agentBindings that Python reads as false (missing, null, false, 0, or
+    an empty string, array or object) holds no entry. FixtureError names the
+    member when verifierState is not an object, when agentBindings is any
+    other value that is not an array, or when an entry read before one
+    matches is not an object or has no agentDid."""
+    if not isinstance(vs, dict):
+        raise FixtureError("verifierState", f"{_json_type(vs)}, not an object")
+    bindings = vs.get("agentBindings") or []
+    if not isinstance(bindings, list):
+        raise FixtureError("verifierState.agentBindings", f"{_json_type(bindings)}, not an array")
+    for i, b in enumerate(bindings):
+        entry = f"verifierState.agentBindings[{i}]"
+        if not isinstance(b, dict):
+            raise FixtureError(entry, f"{_json_type(b)}, not an object")
+        if _member(b, entry, "agentDid") == agent_did:
+            return entry, b
     return None
+
+
+def _verifier_clock(vs: dict) -> datetime:
+    """verifierState.clockRfc3339 as a UTC datetime, or FixtureError naming
+    the member when it is missing, is not a string, or is a string that
+    _parse_rfc3339 cannot read."""
+    clock = _member(vs, "verifierState", "clockRfc3339")
+    if not isinstance(clock, str):
+        raise FixtureError("verifierState.clockRfc3339", f"{_json_type(clock)}, not a string")
+    try:
+        return _parse_rfc3339(clock)
+    except (ValueError, OverflowError) as e:
+        raise FixtureError("verifierState.clockRfc3339", f"cannot be read as a date-time ({e})") from None
 
 
 def _parse_rfc3339(s: str) -> datetime:
@@ -239,11 +335,14 @@ def load_fixture(path: Path) -> dict:
     no single reading, and json.loads would keep the later copy alone where
     the Go verifier's encoding/json keeps a member the later copy omits.
     Members are read under their exact names, as the Go verifier reads them
-    outside challengeResponse."""
+    outside challengeResponse. A file whose top-level value is not a JSON
+    object raises ValueError naming the value's JSON type."""
     f = json.loads(path.read_text(), object_pairs_hook=_JSONObject.from_pairs)
     repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
     if repeated is not None:
         raise ValueError(f"{repeated}: duplicate member name")
+    if not isinstance(f, dict):
+        raise ValueError(f"the top-level value is {_json_type(f)}, not an object")
     return f
 
 
@@ -350,12 +449,26 @@ def run_composition(path: Path, f: dict) -> bool:
 
 
 def run_fixture(path: Path) -> bool:
+    """Checks one fixture file and prints its PASS, FAIL or SKIP block;
+    returns False for FAIL. A file that fails to load, a FixtureError and any
+    other error raised while checking the fixture each print a FAIL block, so
+    that main goes on to the next fixture."""
     try:
         f = load_fixture(path)
     except Exception as e:
         print(f"FAIL  {path}\n       parse error: {e}")
         return False
+    try:
+        return _check_fixture(path, f)
+    except FixtureError as e:
+        print(f"FAIL  {path}\n       fixture error: {e}")
+    except Exception as e:
+        print(f"FAIL  {path}\n       error: {type(e).__name__}: {e}")
+    return False
 
+
+def _check_fixture(path: Path, f: dict) -> bool:
+    """run_fixture's checks of the loaded fixture f."""
     if f.get("fixtureType") == "trustScoreComposition":
         return run_composition(path, f)
     if f.get("fixtureType") != "challengeResponse":
@@ -366,7 +479,7 @@ def run_fixture(path: Path) -> bool:
         print(f"FAIL  {path}\n       challengeResponse payload missing")
         return False
 
-    r = verify_challenge_response(f["challengeResponse"], f["verifierState"])
+    r = verify_challenge_response(f["challengeResponse"], _member(f, "", "verifierState"))
     expected = f["expected"]["verifyResult"]
     observed_detail = r.verdict
     if r.verdict == "REJECT":
