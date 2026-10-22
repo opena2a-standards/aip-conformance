@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,8 +10,10 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	aipconformance "github.com/opena2a-standards/aip-conformance"
 )
@@ -223,5 +226,107 @@ func TestFailingFixtureExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(out, "summary: 0 pass, 1 fail (1 fixtures)") {
 		t.Errorf("missing failing summary in:\n%s", out)
+	}
+}
+
+// memberText returns the one member name written in doc, as text: its quoted
+// name, ": " and its value as written.
+func memberText(t *testing.T, doc, name string) string {
+	t.Helper()
+	key := strconv.Quote(name) + ": "
+	if n := strings.Count(doc, key); n != 1 {
+		t.Fatalf("the fixture writes %s %d times, want once", key, n)
+	}
+	start := strings.Index(doc, key)
+	dec := json.NewDecoder(strings.NewReader(doc[start+len(key):]))
+	var value json.RawMessage
+	if err := dec.Decode(&value); err != nil {
+		t.Fatal(err)
+	}
+	return doc[start : start+len(key)+int(dec.InputOffset())]
+}
+
+// appendMember returns doc with member written as text after the last member
+// of its top-level object.
+func appendMember(t *testing.T, doc, member string) string {
+	t.Helper()
+	body, ok := strings.CutSuffix(doc, "\n}\n")
+	if !ok {
+		t.Fatal("the fixture does not end with the } of its top-level object")
+	}
+	return body + ",\n  " + member + "\n}\n"
+}
+
+// TestRepeatedWrapperMemberIsALoadError: a fixture that writes one member
+// name twice in a JSON object outside challengeResponse fails to load,
+// whatever the two copies hold, and counts as a fail with no verdict. The
+// cases are built from the replay fixture, whose REJECT [NONCE_REPLAY] rests
+// on verifierState.seenNonces. A member spelled in another case is another
+// name: it repeats nothing and is not read as the member, so the verdict
+// stays, as it does for the shipped fixture. ../python/test_verify.py builds
+// the same cases and expects the same lines.
+func TestRepeatedWrapperMemberIsALoadError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-replay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	state := memberText(t, doc, "verifierState")
+	seen := memberText(t, doc, "seenNonces")
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(state, `"verifierState": `)), &members); err != nil {
+		t.Fatal(err)
+	}
+	delete(members, "seenNonces")
+	withoutSeen, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repeats := []struct{ name, doc, member string }{
+		{"verifierState twice, the later copy without seenNonces", appendMember(t, doc, `"verifierState": `+string(withoutSeen)), "verifierState"},
+		{"verifierState twice, both copies the same", appendMember(t, doc, state), "verifierState"},
+		{"seenNonces twice in one verifierState", strings.Replace(doc, seen, seen+",\n    "+seen, 1), "verifierState.seenNonces"},
+		{"the empty name twice in the top-level object", appendMember(t, appendMember(t, doc, `"": 1`), `"": 2`), ""},
+		{"two unpaired surrogate escapes, each decoded to U+FFFD", appendMember(t, appendMember(t, doc, `"\ud800": 1`), `"\udbff": 2`), string(unicode.ReplacementChar)},
+		// Nested past the Python interpreter's default recursion limit of
+		// 1000, which the Python verifier's walk does not recurse into.
+		{"a repeat nested 1100 arrays deep", appendMember(t, doc, `"note": `+strings.Repeat("[", 1100)+`{"a": 1, "a": 2}`+strings.Repeat("]", 1100)), "note" + strings.Repeat("[0]", 1100) + ".a"},
+	}
+	for _, tc := range repeats {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fixture.json")
+			if err := os.WriteFile(path, []byte(tc.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{path}, &stdout, &stderr)
+			want := "FAIL  " + path + "\n       parse error: " + tc.member + ": duplicate member name\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
+			if code != 1 || stdout.String() != want || stderr.Len() != 0 {
+				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 1, stdout:\n%s", code, &stdout, &stderr, want)
+			}
+		})
+	}
+
+	verdicts := []struct{ name, doc string }{
+		{"VerifierState after verifierState", appendMember(t, doc, `"VerifierState": {"seenNonces": []}`)},
+		{"the shipped fixture", ""},
+	}
+	for _, tc := range verdicts {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join("..", "..", "fixtures", "challenge-response-replay.json")
+			if tc.doc != "" {
+				path = filepath.Join(t.TempDir(), "fixture.json")
+				if err := os.WriteFile(path, []byte(tc.doc), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{path}, &stdout, &stderr)
+			want := "PASS  " + path + "\n       expected: REJECT [NONCE_REPLAY]\n       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 0, stdout:\n%s", code, &stdout, &stderr, want)
+			}
+		})
 	}
 }
