@@ -15,12 +15,13 @@
 // Exit code is 0 if every fixture's observed result matches the expected
 // result AND the rejection category matches (when declared).
 //
-// Outside challengeResponse a fixture's members are read under their exact
+// Outside the two §5.1 bodies (challengeResponse.challenge and
+// challengeResponse.response) a fixture's members are read under their exact
 // names (VerifierState is not verifierState), and a fixture that writes one
 // member name twice in the same JSON object fails to load on both verifiers,
 // which counts as a fail (exit code 1).
 //
-// A challengeResponse fixture whose agentBindings entry for response.agentDid
+// A challengeResponse fixture whose agentBindings entry for challenge.agentDid
 // has no publicKeyHex member, or a null one, prints a FAIL block naming the
 // member, in the form the Python verifier uses for a fixture error:
 //
@@ -37,9 +38,9 @@
 // prints the summary line.
 //
 // A fixture of any fixtureType whose verifierState is an object holding an
-// agentBindings or seenNonces that is not an array or null prints that FAIL
-// block before any check runs, with the line the Python verifier prints for
-// it:
+// agentBindings, seenNonces or trustedIssuers that is not an array or null
+// prints that FAIL block before any check runs, with the line the Python
+// verifier prints for it:
 //
 //	FAIL  <path>
 //	       fixture error: verifierState.seenNonces: a number, not an array
@@ -179,28 +180,32 @@ type Fixture struct {
 // fixture parsing (MUST match the Python verifier's load_fixture)
 // ---------------------------------------------------------------------------
 
-// protocolMessages names the fixture member that holds the protocol messages
-// under test. parseFixture leaves its value to encoding/json as written: it
-// is not walked for repeated member names, and its members are not narrowed
-// to their exact names. The Python verifier's _PROTOCOL_MESSAGES holds the
-// same name.
-var protocolMessages = map[string]bool{"challengeResponse": true}
+// protocolMessages names the fixture members that hold the protocol messages
+// under test: the two §5.1 bodies inside challengeResponse. parseFixture
+// leaves their values to encoding/json as written: they are not walked for
+// repeated member names, and their members are not narrowed to their exact
+// names. challengeResponse itself is fixture format, read like the rest of
+// the fixture. The Python verifier's _PROTOCOL_MESSAGES holds the same names.
+var protocolMessages = map[string]bool{"challengeResponse.challenge": true, "challengeResponse.response": true}
 
-// protocolMessagesType is the decode target of the protocolMessages member.
-var protocolMessagesType = reflect.TypeOf(ChallengeResponse{})
+// protocolMessageTypes are the decode targets of the protocolMessages members.
+var protocolMessageTypes = map[reflect.Type]bool{
+	reflect.TypeOf(ChallengeBody{}): true,
+	reflect.TypeOf(ResponseBody{}):  true,
+}
 
-// parseFixture decodes a fixture file. A JSON object outside the value of
-// challengeResponse that writes one member name twice is a load error: the
-// verifier state or expected outcome it carries has no single reading, and
+// parseFixture decodes a fixture file. A JSON object outside the two §5.1
+// bodies that writes one member name twice is a load error: the verifier
+// state, expected outcome or body it carries has no single reading, and
 // encoding/json would decode both copies into one struct, keeping a member
 // the later copy omits, where the Python verifier reads the later copy
-// alone. Outside challengeResponse each member is read under its exact name
+// alone. Outside the two bodies each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
-// reports for it. A verifierState agentBindings or seenNonces that is not an
-// array or null is a *memberError (verifierStateArrays). An agentBindings
-// entry that writes no publicKeyHex, or a null one, is marked for the checks
-// (markPublicKeyHexProblems), and so is a verifierState that writes no
-// clockRfc3339, or a null one (markClockProblem).
+// reports for it. A verifierState agentBindings, seenNonces or trustedIssuers
+// that is not an array or null is a *memberError (verifierStateArrays). An
+// agentBindings entry that writes no publicKeyHex, or a null one, is marked
+// for the checks (markPublicKeyHexProblems), and so is a verifierState that
+// writes no clockRfc3339, or a null one (markClockProblem).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -232,7 +237,7 @@ func (e *memberError) Error() string { return e.member + ": " + e.problem }
 // verifierStateArrays names the verifierState members that hold an array, in
 // the order checkVerifierStateArrays checks them. The Python verifier's
 // _VERIFIER_STATE_ARRAYS holds the same names in the same order.
-var verifierStateArrays = []string{"agentBindings", "seenNonces"}
+var verifierStateArrays = []string{"agentBindings", "seenNonces", "trustedIssuers"}
 
 // checkVerifierStateArrays returns a *memberError naming the first
 // verifierStateArrays member of the verifierState object in raw that holds a
@@ -469,14 +474,15 @@ func (w *memberWalk) walkAt(head string, s pathSegment) (string, bool, error) {
 // case-insensitively, so on its own it decodes VerifierState as
 // verifierState; the Python verifier reads each member by its exact name, so
 // in both verifiers such a member is not the fixture member, which is then
-// absent. The value of challengeResponse (protocolMessagesType) is returned
-// as written. The members kept stay in document order. A value that is not
-// the JSON type t needs is returned unchanged, for the decode to reject.
+// absent. The values of the two §5.1 bodies (protocolMessageTypes) are
+// returned as written. The members kept stay in document order. A value that
+// is not the JSON type t needs is returned unchanged, for the decode to
+// reject.
 func exactMembers(raw json.RawMessage, t reflect.Type) json.RawMessage {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t == protocolMessagesType {
+	if protocolMessageTypes[t] {
 		return raw
 	}
 	switch t.Kind() {
@@ -784,10 +790,15 @@ type result struct {
 
 // verifyChallengeResponse applies the AIP §5.1 step-5 checks in order:
 //
-//  1. Signature valid for challenge + publicKey (cryptographic check)
-//  2. publicKey matches the agentDid's bound key in verifierState.agentBindings
-//  3. Challenge not expired (verifier clock < expiresAt)
-//  4. Nonce not in verifierState.seenNonces
+//  1. Each of the five fields the response echoes (challenge, agentDid,
+//     nonce, issuedAt, expiresAt) equals the challenge body's, compared as
+//     written, and the signature is valid for the challenge body's canonical
+//     payload under publicKey (cryptographic check)
+//  2. publicKey matches the key bound to the challenge body's agentDid in
+//     verifierState.agentBindings
+//  3. Challenge not expired (verifier clock < challenge.expiresAt)
+//  4. The challenge body's nonce is not in verifierState.seenNonces
+//  5. The challenge body's issuerDid is in verifierState.trustedIssuers
 //
 // The first failing check wins; subsequent checks are not performed. When the
 // agentBindings entry check 2 reads has no publicKeyHex, or a null one, or
@@ -795,7 +806,24 @@ type result struct {
 // parseRFC3339 does not read, the result is a fixtureError naming that
 // member instead of a verdict.
 func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
-	// (1) Signature verification
+	// (1) The response echoes the challenge body, whose canonical payload the
+	// signature covers, and the signature verifies
+	echoes := []struct{ name, challenge, response string }{
+		{"challenge", cr.Challenge.Challenge, cr.Response.Challenge},
+		{"agentDid", cr.Challenge.AgentDID, cr.Response.AgentDID},
+		{"nonce", cr.Challenge.Nonce, cr.Response.Nonce},
+		{"issuedAt", cr.Challenge.IssuedAt, cr.Response.IssuedAt},
+		{"expiresAt", cr.Challenge.ExpiresAt, cr.Response.ExpiresAt},
+	}
+	for _, e := range echoes {
+		if e.response != e.challenge {
+			return result{
+				verdict:        "REJECT",
+				rejectCategory: "SIGNATURE_INVALID",
+				reason:         fmt.Sprintf("response.%s does not match challenge.%s", e.name, e.name),
+			}
+		}
+	}
 	pubBytes, err := base64.RawStdEncoding.DecodeString(cr.Response.PublicKey)
 	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
 		return result{
@@ -821,13 +849,13 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		}
 	}
 
-	// (2) publicKey matches bound key for response.agentDid
-	bound, entry, found := lookupAgentBinding(vs, cr.Response.AgentDID)
+	// (2) publicKey matches the key bound to challenge.agentDid
+	bound, entry, found := lookupAgentBinding(vs, cr.Challenge.AgentDID)
 	if !found {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
-			reason:         fmt.Sprintf("response.agentDid %s has no agentBinding in verifierState", cr.Response.AgentDID),
+			reason:         fmt.Sprintf("challenge.agentDid %s has no agentBinding in verifierState", cr.Challenge.AgentDID),
 		}
 	}
 	if bound.publicKeyHexProblem != "" {
@@ -838,7 +866,7 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
-			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", cr.Response.AgentDID, quotedKey(boundPubHex), quotedKey(bound.PublicKeyHex)),
+			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", cr.Challenge.AgentDID, quotedKey(boundPubHex), quotedKey(bound.PublicKeyHex)),
 		}
 	}
 
@@ -866,20 +894,29 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		}
 	}
 
-	// (4) Nonce not in seenNonces
+	// (4) challenge.nonce not in seenNonces
 	for _, seen := range vs.SeenNonces {
-		if seen == cr.Response.Nonce {
+		if seen == cr.Challenge.Nonce {
 			return result{
 				verdict:        "REJECT",
 				rejectCategory: "NONCE_REPLAY",
-				reason:         fmt.Sprintf("response.nonce was already seen by the verifier"),
+				reason:         "challenge.nonce was already seen by the verifier",
 			}
+		}
+	}
+
+	// (5) challenge.issuerDid is a trusted issuer
+	if !trustedIssuer(vs, cr.Challenge.IssuerDID) {
+		return result{
+			verdict:        "REJECT",
+			rejectCategory: "UNTRUSTED_ISSUER",
+			reason:         fmt.Sprintf("challenge.issuerDid %s is not in verifierState.trustedIssuers", cr.Challenge.IssuerDID),
 		}
 	}
 
 	return result{
 		verdict:        "ACCEPT",
-		signaturesNote: fmt.Sprintf("signature: ed25519=true (verified against agentDid %s bound key)", cr.Response.AgentDID),
+		signaturesNote: fmt.Sprintf("signature: ed25519=true (verified against agentDid %s bound key)", cr.Challenge.AgentDID),
 	}
 }
 
@@ -891,6 +928,15 @@ func quotedKey(key string) string {
 		return key[:16]
 	}
 	return key
+}
+
+func trustedIssuer(vs VerifierState, issuerDID string) bool {
+	for _, trusted := range vs.TrustedIssuers {
+		if trusted == issuerDID {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupAgentBinding returns the first verifierState.agentBindings entry whose

@@ -3,7 +3,7 @@
 Conformance fixtures and reference verifiers for the
 [Agent Identity Protocol (AIP) v1.0.0-draft](https://github.com/opena2a-org/agent-identity-protocol).
 
-**Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (4) and
+**Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (8) and
 §6.1 trust-score composition fixtures (3) shipped, 2 verifiers,
 `MANIFEST.sha256` pinned. AIP §6.4 (VC `AgentTrustCredential`) conformance
 is covered transitively via
@@ -24,12 +24,12 @@ first output line repeats it with the module path, then one block per
 fixture follows and a summary:
 
 ```text
-fixtures: 7 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
-PASS  fixtures/challenge-response-replay.json
-       expected: REJECT [NONCE_REPLAY]
-       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]
+fixtures: 11 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
+PASS  fixtures/challenge-response-echoed-agent-differs.json
+       expected: REJECT [SIGNATURE_INVALID]
+       observed: REJECT[SIGNATURE_INVALID: response.agentDid does not match challenge.agentDid]
 ...
-summary: 7 pass, 0 fail (7 fixtures)
+summary: 11 pass, 0 fail (11 fixtures)
 ```
 
 Name the version: `@latest` does not reach the root module through the
@@ -66,10 +66,16 @@ Both verifiers walk every `*.json` file in the directory you point them at
 (or you may pass individual fixture files); with no argument, the Go
 verifier walks the copy of `fixtures/` built into it. Exit code is 0 if
 every fixture's observed result matches the expected result and the
-rejection category matches (when declared). Outside `challengeResponse`,
-both read a fixture's members under their exact names (`VerifierState` is
-not `verifierState`), and a fixture that writes one member name twice in
-the same JSON object fails to load, which counts as a fail (exit code 1).
+rejection category matches (when declared). Outside the two §5.1 bodies
+(`challengeResponse.challenge` and `challengeResponse.response`), both read
+a fixture's members under their exact names (`VerifierState` is not
+`verifierState`), and a fixture that writes one member name twice in the
+same JSON object fails to load, as does one whose `verifierState` holds a
+`trustedIssuers`, `agentBindings` or `seenNonces` member that is neither an
+array nor null; each counts as a fail (exit code 1).
+[`fixtures/load-errors/`](./fixtures/load-errors) holds pinned examples
+that a conforming verifier refuses to load
+([lines](docs/checks.md#load-error-fixtures)).
 
 ## Fixtures
 
@@ -86,6 +92,10 @@ per vector. Fixture bytes are pinned in
 | `challenge-response-wrong-key` | REJECT (UNTRUSTED_KEY) | a valid signature by a key not bound to the agent |
 | `challenge-response-stale-challenge` | REJECT (CHALLENGE_EXPIRED) | a challenge that expired 25 minutes before the pinned clock |
 | `challenge-response-replay` | REJECT (NONCE_REPLAY) | a nonce already in `verifierState.seenNonces` |
+| `challenge-response-echoed-nonce-differs` | REJECT (SIGNATURE_INVALID) | a response that echoes a nonce other than the signed challenge body's |
+| `challenge-response-echoed-agent-differs` | REJECT (SIGNATURE_INVALID) | a response under another agent's key that echoes that agent's DID |
+| `challenge-response-other-agent-key` | REJECT (UNTRUSTED_KEY) | a valid signature by a key bound to another agent |
+| `challenge-response-untrusted-issuer` | REJECT (UNTRUSTED_ISSUER) | a challenge whose `issuerDid` is not in `verifierState.trustedIssuers` |
 | `trust-score-unscored-zero-event-agent` | `UNSCORED` | included weight below the §6.1 threshold of 0.50 |
 | `trust-score-measured-six-factors-capped` | `MEASURED` | the neutral-imputed ceiling binds |
 | `trust-score-measured-at-included-weight-0.50` | `MEASURED` | included weight at the threshold; the threshold is strict |
@@ -105,7 +115,7 @@ Inputs, expected values and composition rules per fixture: [docs/checks.md](docs
 This is the section that future reviewers, second-implementation authors,
 and A2A coordination-map readers should read before forming judgments.
 
-- **Canonical form:** the agent signs 5 pipe-delimited fields, not the full JSON; `publicKey`, `keyId`, `signedAt` and `algorithm` are unsigned.
+- **Canonical form:** the agent signs 5 pipe-delimited fields, not the full JSON; `publicKey`, `keyId`, `signedAt` and `algorithm` are unsigned. The response's echo of each signed field must equal the challenge body's, and the checks read the challenge body.
 - **Wire format:** challenge and response bodies pin fields beyond AIP-SPEC §5.1, as suite contracts, not spec changes.
 - **Replay:** the verifier is stateless; the replay fixture declares prior nonces in `verifierState.seenNonces`.
 - **Test keys:** `issuer-primary` is the same keypair as in atx-conformance and atp-conformance; all seeds are TEST-ONLY.

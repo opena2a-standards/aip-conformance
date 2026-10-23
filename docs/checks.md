@@ -5,6 +5,20 @@ exercises. The [README](../README.md) lists them in short.
 
 ## §5.1 challenge-response fixtures
 
+Both verifiers apply the AIP §5.1 checks in this order; the first that
+fails decides the reject category:
+
+1. Each of the five fields the response echoes (`challenge`, `agentDid`,
+   `nonce`, `issuedAt`, `expiresAt`) equals the challenge body's, compared
+   as written, and the Ed25519 signature verifies over the challenge body's
+   canonical form under `response.publicKey` (`SIGNATURE_INVALID`).
+2. `response.publicKey` is the key bound to `challenge.agentDid` in
+   `verifierState.agentBindings` (`UNTRUSTED_KEY`).
+3. The verifier clock is before `challenge.expiresAt` (`CHALLENGE_EXPIRED`).
+4. `challenge.nonce` is not in `verifierState.seenNonces` (`NONCE_REPLAY`).
+5. `challenge.issuerDid` is in `verifierState.trustedIssuers`
+   (`UNTRUSTED_ISSUER`).
+
 All fixtures use:
 
 - Trusted issuer DID: `did:opena2a:authority:opena2a.org` (the IdP that issued the challenge)
@@ -12,6 +26,7 @@ All fixtures use:
 - Pinned verifier clock: `2026-05-28T00:00:00Z`
 - Agent-bound Ed25519 keypair source: [RFC 8032 §7.1 Test 2](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
 - Agent-unbound Ed25519 keypair source (wrong-key fixture): [RFC 8032 §7.1 Test 3](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
+- Second agent (echoed-agent-differs and other-agent-key fixtures): `did:opena2a:agent:agent_conformance_test_002`, bound keypair source [RFC 8032 §7.1 TEST 1024](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
 
 | Fixture | Expected | Exercises |
 |---|---|---|
@@ -19,6 +34,35 @@ All fixtures use:
 | `fixtures/challenge-response-wrong-key.json` | REJECT (UNTRUSTED_KEY) | Agent signs with the unbound key (`agent-unbound-key`). Signature is mathematically valid Ed25519, but the `publicKey` returned in the response does not match the bound key declared for `testAgentDid` in `verifierState.agentBindings`. |
 | `fixtures/challenge-response-stale-challenge.json` | REJECT (CHALLENGE_EXPIRED) | `challenge.expiresAt` is 25 minutes earlier than `verifierState.clockRfc3339`. The signature is otherwise mathematically valid and made by the agent's bound key. |
 | `fixtures/challenge-response-replay.json` | REJECT (NONCE_REPLAY) | Different challenge bytes from the valid fixture, but reuses its nonce. The signature is mathematically valid, the `publicKey` matches the bound key, the challenge is not expired — but the nonce appears in `verifierState.seenNonces`, modelling "a prior verification already consumed this nonce." |
+| `fixtures/challenge-response-echoed-nonce-differs.json` | REJECT (SIGNATURE_INVALID) | The replay transcript with one edit: the response echoes a nonce the verifier has not seen, while the signed challenge body carries the nonce listed in `verifierState.seenNonces`. Check 1 refuses the echo, naming `response.nonce`. |
+| `fixtures/challenge-response-echoed-agent-differs.json` | REJECT (SIGNATURE_INVALID) | A challenge minted for `agent_conformance_test_001`, answered under the key bound to `agent_conformance_test_002` with that agent's DID echoed; `verifierState` binds both agents' keys. The signature verifies over the challenge body; check 1 refuses the echo, naming `response.agentDid`. |
+| `fixtures/challenge-response-other-agent-key.json` | REJECT (UNTRUSTED_KEY) | The same challenge and key, with every challenge field echoed as written. The presented key is bound, but to another agent than `challenge.agentDid`. |
+| `fixtures/challenge-response-untrusted-issuer.json` | REJECT (UNTRUSTED_ISSUER) | The valid transcript under a `verifierState` whose `trustedIssuers` does not hold the challenge's `issuerDid`. Checks 1-4 pass; check 5 refuses. |
+
+## Load-error fixtures
+
+The files in [`fixtures/load-errors/`](../fixtures/load-errors) are the
+valid fixture with one edit that the fixture format refuses, pinned in
+`MANIFEST.sha256`. They are not part of `fixtures/*.json`: no verifier walk
+of `fixtures/` reads them, and neither does the Go verifier's embedded set.
+A conforming verifier refuses to load each one; their `expected` member is
+the valid fixture's ACCEPT and is never reached. Both reference verifiers
+print the same line for each, and a run over the directory exits 1:
+
+| Fixture | Line both verifiers print |
+|---|---|
+| `challenge-response-repeated-challenge.json` | `parse error: challengeResponse.challenge: duplicate member name` |
+| `challenge-response-repeated-response.json` | `parse error: challengeResponse.response: duplicate member name` |
+| `verifier-state-agent-bindings-not-an-array.json` | `fixture error: verifierState.agentBindings: an object, not an array` |
+| `verifier-state-seen-nonces-not-an-array.json` | `fixture error: verifierState.seenNonces: a number, not an array` |
+| `verifier-state-trusted-issuers-not-an-array.json` | `fixture error: verifierState.trustedIssuers: a string, not an array` |
+
+The two rules they pin: a JSON object outside the two §5.1 bodies
+(`challengeResponse.challenge` and `challengeResponse.response`) that
+writes one member name twice fails to load, `challengeResponse` included;
+and a `trustedIssuers`, `agentBindings` or `seenNonces` member of
+`verifierState` that is present must be an array or null (null and a
+missing member read as the empty array).
 
 ## §6.1 trust-score composition fixtures
 

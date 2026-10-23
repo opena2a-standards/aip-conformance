@@ -1,0 +1,14 @@
+{
+  "$comment": "The bound key of a second conformance agent (did:opena2a:agent:agent_conformance_test_002) — used by the fixtures in which a challenge minted for agent_conformance_test_001 is answered under this agent's key, so that verifierState binds the presented key to an agent other than the challenge's agentDid. Seed and public key are RFC 8032 §7.1 TEST 1024, a published test vector. This is a TEST-ONLY keypair. The seed is publicly known; never use it in production.",
+  "role": "agent-second-key",
+  "algorithm": "Ed25519",
+  "provenance": {
+    "source": "RFC 8032 §7.1 TEST 1024",
+    "ref": "https://datatracker.ietf.org/doc/html/rfc8032#section-7.1",
+    "purpose": "deterministic, reproducible reference vector for a second bound agent identity key"
+  },
+  "seedHex": "f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5",
+  "publicKeyHex": "278117fc144c72340f67d0f2316e8386ceffbf2b2428c9c51fef7c597f1d426e",
+  "agentDid": "did:opena2a:agent:agent_conformance_test_002",
+  "keyId": "did:opena2a:agent:agent_conformance_test_002#key-1"
+}

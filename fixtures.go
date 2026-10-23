@@ -6,7 +6,7 @@
 //
 // The README's first command names the current suite version. The embedded
 // bytes are the fixtures/*.json files committed at the module version in
-// use, the same files MANIFEST.sha256 pins.
+// use, the files MANIFEST.sha256 pins outside fixtures/load-errors/.
 package aipconformance
 
 import "embed"

@@ -43,6 +43,12 @@ challenge cannot be replayed at Bob's relying party because the agentDid
 and IdP-issued nonce are part of the signed payload, and Bob's IdP would
 issue different bytes.
 
+The response echoes the five signed fields. Both verifiers compare each
+echo with the challenge body's value as written and reject a response
+whose echo differs (`SIGNATURE_INVALID`, naming the field); the bound-key,
+nonce and trusted-issuer checks read the challenge body
+([the checks in order](checks.md#51-challenge-response-fixtures)).
+
 ### Challenge and response wire-format pinning (beyond AIP-SPEC §5.1)
 
 AIP-SPEC §5.1 step 2 names only `{challenge, expiresAt}` on the IdP →
@@ -78,8 +84,9 @@ RFC 8032 §7.1 Test 1 seed, `did:opena2a:authority:opena2a.org` issuer
 DID. A peer cosigner who has already audited atx-conformance or
 atp-conformance vectors can rely on the same audit for this suite. The
 agent-bound and agent-unbound keypairs are RFC 8032 §7.1 Test 2 and Test
-3 respectively. All three vector files are TEST-ONLY; the seeds are
-publicly known and MUST NOT be used in production.
+3 respectively, and the second agent's bound keypair (`agent-second-key`)
+is TEST 1024. All four vector files are TEST-ONLY; the seeds are publicly
+known and MUST NOT be used in production.
 
 ## Continuous verification
 
@@ -116,7 +123,9 @@ shipped fixture set, N being the number of `*.json` files in `fixtures/`
 (sample run: [README](../README.md#running-the-verifiers)). Any divergence
 on bytes (the fixture file was modified) or on verifier semantics (the
 verifier has drifted from the canonical signing form) shows up as one or
-more FAIL lines.
+more FAIL lines. The files under `fixtures/load-errors/` are not in that
+set: both verifiers refuse to load each one, and a run over that directory
+exits 1 ([the line for each](checks.md#load-error-fixtures)).
 
 ## Reproducing the fixtures
 
@@ -146,6 +155,7 @@ go.mod                           Go module root; `go run .../verifiers/go@<versi
 fixtures.go                      embeds fixtures/*.json into the Go verifier's no-argument run
 docs/                            reference pages, this one included
 fixtures/                        conformance fixtures (byte-stable JSON)
+fixtures/load-errors/            fixtures both verifiers refuse to load (byte-stable JSON)
 vectors/                         test keypair vectors (TEST-ONLY)
 schemas/                         vendored AIP-SPEC JSON schemas (drift-gated)
 verifiers/go/                    Go reference verifier (Ed25519 stdlib), the published entry point

@@ -9,7 +9,8 @@ pinned verifierState.
 Exit code is 0 if every fixture's observed result matches the expected
 result AND the rejection category matches (when declared).
 
-Outside challengeResponse a fixture's members are read under their exact
+Outside the two §5.1 bodies (challengeResponse.challenge and
+challengeResponse.response) a fixture's members are read under their exact
 names (VerifierState is not verifierState), and a fixture that writes one
 member name twice in the same JSON object fails to load on both verifiers,
 which counts as a fail (exit code 1).
@@ -24,8 +25,9 @@ the member:
            fixture error: verifierState.agentBindings[0].agentDid: missing
 
 A fixture of any fixtureType whose verifierState is an object holding an
-agentBindings or seenNonces that is not an array or null prints that FAIL
-block before any check runs, with the line the Go verifier prints for it:
+agentBindings, seenNonces or trustedIssuers that is not an array or null
+prints that FAIL block before any check runs, with the line the Go verifier
+prints for it:
 
     FAIL  <path>
            fixture error: verifierState.seenNonces: a number, not an array
@@ -110,11 +112,11 @@ class FixtureError(ValueError):
     "verifierState.agentBindings[0].agentDid: missing". It is raised for a
     challengeResponse fixture that carries a challengeResponse payload and no
     verifierState member, and by the §5.1 checks for verifierState and for
-    the agentBindings, publicKeyHex, clockRfc3339 and seenNonces members
-    they read from it. The checks read verifierState only after the
-    signature check passes, except that an agentBindings or seenNonces that
-    is not an array or null fails any fixture before its checks run
-    (_check_verifier_state_arrays)."""
+    the agentBindings, publicKeyHex, clockRfc3339, seenNonces and
+    trustedIssuers members they read from it. The checks read verifierState
+    only after the signature check passes, except that an agentBindings,
+    seenNonces or trustedIssuers that is not an array or null fails any
+    fixture before its checks run (_check_verifier_state_arrays)."""
 
     def __init__(self, member: str, problem: str) -> None:
         super().__init__(f"{member}: {problem}")
@@ -144,15 +146,41 @@ def _member(obj: dict, label: str, name: str) -> Any:
     return obj[name]
 
 
+# The five challenge fields a response echoes, in the order of the canonical
+# signing form, whose challenge-body values the signature covers.
+_ECHOED_FIELDS = ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt")
+
+
+def _string_member(body: Any, name: str) -> Any:
+    """The member name of a §5.1 body as the Go verifier's encoding/json reads
+    it into a string field: a missing member and null read as the empty
+    string."""
+    value = body.get(name)
+    return "" if value is None else value
+
+
 def verify_challenge_response(cr: dict, vs: Any) -> Result:
     """Apply the AIP §5.1 step-5 checks in order. First failing check wins.
     vs is the fixture's verifierState; a member of it that a check reads and
-    cannot use raises FixtureError."""
+    cannot use raises FixtureError.
+
+      1. Each of the five fields the response echoes (challenge, agentDid,
+         nonce, issuedAt, expiresAt) equals the challenge body's, compared as
+         written, and the signature is valid for the challenge body's
+         canonical payload under publicKey
+      2. publicKey matches the key bound to the challenge body's agentDid
+      3. Challenge not expired (verifier clock < challenge.expiresAt)
+      4. The challenge body's nonce is not in verifierState.seenNonces
+      5. The challenge body's issuerDid is in verifierState.trustedIssuers"""
 
     response = cr["response"]
     challenge = cr["challenge"]
 
-    # (1) Signature verification
+    # (1) The response echoes the challenge body, whose canonical payload the
+    # signature covers, and the signature verifies
+    for name in _ECHOED_FIELDS:
+        if _string_member(response, name) != _string_member(challenge, name):
+            return Result("REJECT", "SIGNATURE_INVALID", f"response.{name} does not match challenge.{name}")
     try:
         pub_bytes = _b64_no_pad_decode(response["publicKey"])
     except Exception as e:
@@ -178,11 +206,12 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
         return Result("REJECT", "SIGNATURE_INVALID",
                       "Ed25519 signature did not verify against the canonical 5-field payload")
 
-    # (2) publicKey matches bound key for response.agentDid
-    found = _lookup_agent_binding(vs, response["agentDid"])
+    # (2) publicKey matches the key bound to challenge.agentDid
+    agent_did = _string_member(challenge, "agentDid")
+    found = _lookup_agent_binding(vs, agent_did)
     if found is None:
         return Result("REJECT", "UNTRUSTED_KEY",
-                      f"response.agentDid {response['agentDid']} has no agentBinding in verifierState")
+                      f"challenge.agentDid {agent_did} has no agentBinding in verifierState")
     binding, bound = found
     bound_key = _member(bound, binding, "publicKeyHex")
     bound_pub_hex = pub_bytes.hex()
@@ -194,7 +223,7 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
             raise FixtureError(f"{binding}.publicKeyHex", f"{_json_type(bound_key)}, not a string")
         return Result(
             "REJECT", "UNTRUSTED_KEY",
-            f"response.publicKey does not match bound key for agentDid {response['agentDid']} "
+            f"response.publicKey does not match bound key for agentDid {agent_did} "
             f"(got {bound_pub_hex[:16]}..., bound is {bound_key[:16]}...)",
         )
 
@@ -210,15 +239,20 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
             f"verifier clock {_emit_rfc3339(clock)} is not before challenge.expiresAt {_emit_rfc3339(expires_at)}",
         )
 
-    # (4) Nonce not in seenNonces
-    seen = _array_member(vs, "seenNonces")
-    if response["nonce"] in seen:
+    # (4) challenge.nonce not in seenNonces
+    if _string_member(challenge, "nonce") in _array_member(vs, "seenNonces"):
         return Result("REJECT", "NONCE_REPLAY",
-                      "response.nonce was already seen by the verifier")
+                      "challenge.nonce was already seen by the verifier")
+
+    # (5) challenge.issuerDid is a trusted issuer
+    issuer_did = _string_member(challenge, "issuerDid")
+    if issuer_did not in _array_member(vs, "trustedIssuers"):
+        return Result("REJECT", "UNTRUSTED_ISSUER",
+                      f"challenge.issuerDid {issuer_did} is not in verifierState.trustedIssuers")
 
     return Result(
         verdict="ACCEPT",
-        signatures_note=f"signature: ed25519=true (verified against agentDid {response['agentDid']} bound key)",
+        signatures_note=f"signature: ed25519=true (verified against agentDid {agent_did} bound key)",
     )
 
 
@@ -255,11 +289,12 @@ def _array_member(vs: dict, name: str) -> list:
 
 
 def _check_verifier_state_arrays(f: dict) -> None:
-    """FixtureError naming the first of verifierState.agentBindings and
-    verifierState.seenNonces, in that order, that holds a value that is not
-    an array or null, when verifierState is an object. It is checked before
-    any other fixture check, for every fixtureType, as the Go verifier's
-    parseFixture checks it (verifierStateArrays)."""
+    """FixtureError naming the first of verifierState.agentBindings,
+    verifierState.seenNonces and verifierState.trustedIssuers, in that order,
+    that holds a value that is not an array or null, when verifierState is an
+    object. It is checked before any other fixture check, for every
+    fixtureType, as the Go verifier's parseFixture checks it
+    (verifierStateArrays)."""
     vs = f.get("verifierState")
     if isinstance(vs, dict):
         for name in _VERIFIER_STATE_ARRAYS:
@@ -370,15 +405,17 @@ def _emit_rfc3339(t: _Instant) -> str:
 # fixture loading (MUST match the Go verifier's parseFixture)
 # ---------------------------------------------------------------------------
 
-# The fixture member that holds the protocol messages under test. Its value is
-# not walked for repeated member names. The Go verifier's protocolMessages
-# holds the same name.
-_PROTOCOL_MESSAGES = frozenset({"challengeResponse"})
+# The fixture members that hold the protocol messages under test: the two §5.1
+# bodies inside challengeResponse. Their values are not walked for repeated
+# member names; challengeResponse itself is fixture format, walked like the
+# rest of the fixture. The Go verifier's protocolMessages holds the same
+# names.
+_PROTOCOL_MESSAGES = frozenset({"challengeResponse.challenge", "challengeResponse.response"})
 
 # The verifierState members that hold an array, in the order
 # _check_verifier_state_arrays checks them. The Go verifier's
 # verifierStateArrays holds the same names in the same order.
-_VERIFIER_STATE_ARRAYS = ("agentBindings", "seenNonces")
+_VERIFIER_STATE_ARRAYS = ("agentBindings", "seenNonces", "trustedIssuers")
 
 # An unpaired UTF-16 surrogate, which json.loads keeps when a JSON string
 # escapes one with no partner beside it ("\ud800"). The Go verifier's
@@ -453,14 +490,14 @@ def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> O
 
 
 def load_fixture(path: Path) -> dict:
-    """Reads a fixture file. A JSON object outside the value of
-    challengeResponse that writes one member name twice raises ValueError
-    naming the member: the verifier state or expected outcome it carries has
-    no single reading, and json.loads would keep the later copy alone where
-    the Go verifier's encoding/json keeps a member the later copy omits.
-    Members are read under their exact names, as the Go verifier reads them
-    outside challengeResponse. A file whose top-level value is not a JSON
-    object raises ValueError naming the value's JSON type."""
+    """Reads a fixture file. A JSON object outside the two §5.1 bodies that
+    writes one member name twice raises ValueError naming the member: the
+    verifier state, expected outcome or body it carries has no single
+    reading, and json.loads would keep the later copy alone where the Go
+    verifier's encoding/json keeps a member the later copy omits. Members are
+    read under their exact names, as the Go verifier reads them outside the
+    two bodies. A file whose top-level value is not a JSON object raises
+    ValueError naming the value's JSON type."""
     f = json.loads(path.read_text(), object_pairs_hook=_JSONObject.from_pairs)
     repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
     if repeated is not None:
