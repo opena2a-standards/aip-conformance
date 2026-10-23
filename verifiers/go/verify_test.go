@@ -328,7 +328,7 @@ func TestRepeatedWrapperMemberIsALoadError(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			code := run([]string{path}, &stdout, &stderr)
-			want := "PASS  " + path + "\n       expected: REJECT [NONCE_REPLAY]\n       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+			want := "PASS  " + path + "\n       expected: REJECT [NONCE_REPLAY]\n       observed: REJECT[NONCE_REPLAY: challenge.nonce was already seen by the verifier]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
 			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
 				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 0, stdout:\n%s", code, &stdout, &stderr, want)
 			}
@@ -377,15 +377,16 @@ func TestRepeatedMemberWalkAllocatesInProportionToTheDocument(t *testing.T) {
 }
 
 // TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn: when the
-// agentBindings entry for response.agentDid has no publicKeyHex, a null one,
+// agentBindings entry for challenge.agentDid has no publicKeyHex, a null one,
 // or a string shorter than 16 characters that is not the response key, the
 // fixture prints one FAIL block, and the run goes on to the next fixture and
 // prints the summary line. A missing or null publicKeyHex is a fixture error
 // naming the member; a short string is quoted whole in the REJECT
 // [UNTRUSTED_KEY] reason. The cases are built from the valid fixture, and
 // each runs before a copy of it, whose PASS block follows unchanged. The
-// checks do not read an entry for another agentDid, or any entry when the
-// signature does not verify, so those cases keep their verdicts.
+// checks do not read an entry for another agentDid, or any entry when a
+// response echo differs from the challenge or the signature does not verify,
+// so those cases keep their verdicts.
 // ../python/verify.py prints the same lines for copies edited the same way.
 func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
@@ -439,10 +440,17 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 		return strings.Replace(text, from, to, 1)
 	}
 	// The challenge comes before the response in the fixture, so the first
-	// issuedAt is the signed one.
-	badSignature := replaced(replaced(withBindings(withoutKey),
-		`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`),
-		`"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`)
+	// issuedAt is the signed one and the second is the response's echo of it.
+	// A later first issuedAt alone is an echo that differs; a later issuedAt
+	// in both keeps the echo and is a signature that does not verify.
+	later := func(text string) string {
+		return replaced(text, `"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`)
+	}
+	signatureInvalid := func(text string) string {
+		return replaced(text, `"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`)
+	}
+	echoDiffers := signatureInvalid(later(withBindings(withoutKey)))
+	badSignature := signatureInvalid(later(later(withBindings(withoutKey))))
 	mismatch := func(quoted string) string {
 		return "       expected: ACCEPT\n" +
 			"       observed: REJECT[UNTRUSTED_KEY: response.publicKey does not match bound key for agentDid " + agent +
@@ -489,6 +497,9 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 		{"a signature that does not verify, with no publicKeyHex", badSignature, true,
 			"       expected: REJECT [SIGNATURE_INVALID]\n" +
 				"       observed: REJECT[SIGNATURE_INVALID: Ed25519 signature did not verify against the canonical 5-field payload]\n"},
+		{"a response echo that differs, with no publicKeyHex", echoDiffers, true,
+			"       expected: REJECT [SIGNATURE_INVALID]\n" +
+				"       observed: REJECT[SIGNATURE_INVALID: response.issuedAt does not match challenge.issuedAt]\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -599,8 +610,10 @@ func TestUnreadableClockFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	if withoutClock == doc {
 		t.Fatal("the valid fixture does not write clockRfc3339 before another verifierState member")
 	}
+	// A later issuedAt in the challenge body and in the response's echo of it
+	// keeps the echo and is a signature that does not verify.
 	badSignature := strings.Replace(strings.Replace(withClock(`"clockRfc3339": null`),
-		`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 1),
+		`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2),
 		`"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`, 1)
 	form := "is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm"
 
@@ -819,11 +832,11 @@ func TestEachTimestampIsReadAsInPython(t *testing.T) {
 }
 
 // TestEachTimestampGetsThePythonVerdict: each timestamp of readTimestamps
-// and unreadTimestamps, as a challenge issuedAt or expiresAt under the
-// shipped signature or under one made over the payload the verifier
-// builds, gets the verdict, category and reason that ../python/verify.py
-// gives the same file, apart from the quotes around a value in a reason.
-// The cases are built from the valid fixture.
+// and unreadTimestamps, as a challenge issuedAt or expiresAt that the
+// response echoes as written, under the shipped signature or under one made
+// over the payload the verifier builds, gets the verdict, category and
+// reason that ../python/verify.py gives the same file, apart from the quotes
+// around a value in a reason. The cases are built from the valid fixture.
 func TestEachTimestampGetsThePythonVerdict(t *testing.T) {
 	const shipped = "2026-05-28T00:03:00Z"
 	badSignature := "Ed25519 signature did not verify against the canonical 5-field payload"
@@ -843,6 +856,7 @@ func TestEachTimestampGetsThePythonVerdict(t *testing.T) {
 		withMember := func(member string, sign bool) map[string]any {
 			doc := validDoc(t)
 			object(doc, "challengeResponse", "challenge")[member] = tc.value
+			object(doc, "challengeResponse", "response")[member] = tc.value
 			if sign {
 				signChallenge(t, doc, map[string]string{member: tc.signed})
 			}
@@ -883,4 +897,418 @@ func TestClockOutsideYears1To9999IsRead(t *testing.T) {
 	assertVerdict(t, withClock("0001-01-01T00:00:00+01:00"), "ACCEPT", "", "")
 	assertVerdict(t, withClock("9999-12-31T23:59:59-01:00"), "REJECT", "CHALLENGE_EXPIRED",
 		"verifier clock 10000-01-01T00:59:59Z is not before challenge.expiresAt 2026-05-28T00:03:00Z")
+}
+
+// probeIssuer is the issuer of every transcript the tests build at run time.
+const probeIssuer = "did:opena2a:authority:issuer.example"
+
+// probeAgent is an agent DID with an Ed25519 key generated for the test run.
+type probeAgent struct {
+	did  string
+	priv ed25519.PrivateKey
+}
+
+func newProbeAgent(t *testing.T, did string) probeAgent {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return probeAgent{did: did, priv: priv}
+}
+
+func (a probeAgent) publicKey() ed25519.PublicKey { return a.priv.Public().(ed25519.PublicKey) }
+
+func (a probeAgent) binding() AgentBinding {
+	return AgentBinding{AgentDID: a.did, Algorithm: "Ed25519", PublicKeyHex: hex.EncodeToString(a.publicKey())}
+}
+
+// probeBytes is n bytes, each b, as unpadded base64.
+func probeBytes(b byte, n int) string {
+	return base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{b}, n))
+}
+
+// probeChallenge is a challenge body minted for agent by probeIssuer that
+// carries nonce and expires at 2026-05-28T00:03:00Z.
+func probeChallenge(agent probeAgent, nonce string) ChallengeBody {
+	return ChallengeBody{
+		Challenge: probeBytes(7, 32),
+		AgentDID:  agent.did,
+		Nonce:     nonce,
+		IssuedAt:  "2026-05-27T23:58:00Z",
+		ExpiresAt: "2026-05-28T00:03:00Z",
+		IssuerDID: probeIssuer,
+	}
+}
+
+// probeAnswer is signer's response to cb: the five challenge fields echoed
+// with echoedAgentDID as the agentDid, then edit applied, and a signature
+// over cb's canonical payload under signer's key.
+func probeAnswer(cb ChallengeBody, signer probeAgent, echoedAgentDID string, edit func(*ResponseBody)) ResponseBody {
+	r := ResponseBody{
+		AgentDID:  echoedAgentDID,
+		Challenge: cb.Challenge,
+		Nonce:     cb.Nonce,
+		IssuedAt:  cb.IssuedAt,
+		ExpiresAt: cb.ExpiresAt,
+		Signature: base64.RawStdEncoding.EncodeToString(ed25519.Sign(signer.priv, canonicalChallengeResponsePayload(cb))),
+		PublicKey: base64.RawStdEncoding.EncodeToString(signer.publicKey()),
+		KeyID:     signer.did + "#key-1",
+		SignedAt:  "2026-05-27T23:58:30Z",
+		Algorithm: "Ed25519",
+	}
+	if edit != nil {
+		edit(&r)
+	}
+	return r
+}
+
+// runText runs the verifier on a file holding text and returns the file's
+// path, the exit code and standard output; standard error must be empty.
+func runText(t *testing.T, text string) (string, int, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.json")
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{path}, &stdout, &stderr)
+	if stderr.Len() != 0 {
+		t.Errorf("stderr not empty:\n%s", &stderr)
+	}
+	return path, code, stdout.String()
+}
+
+// passBlock is the output of a run over one fixture that passes with the
+// verdict category (empty for ACCEPT) and line: the reject reason, or the
+// note an ACCEPT prints.
+func passBlock(path, category, line string) string {
+	if category == "" {
+		return "PASS  " + path + "\n       expected: ACCEPT\n       observed: ACCEPT\n       " + line + "\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+	}
+	return "PASS  " + path + "\n       expected: REJECT [" + category + "]\n       observed: REJECT[" + category + ": " + line + "]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+}
+
+// failBlock is the output of a run over one fixture that fails with line.
+func failBlock(path, line string) string {
+	return "FAIL  " + path + "\n       " + line + "\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
+}
+
+// TestChecksReadTheChallengeBody: each of the five fields a response echoes
+// must equal the challenge body's, which the signature covers, or the
+// transcript is REJECT [SIGNATURE_INVALID] naming the field; the fields are
+// compared as written. The bound-key check reads the challenge body's
+// agentDid and the nonce check its nonce, and the trusted-issuer check runs
+// fifth, REJECT [UNTRUSTED_ISSUER]. Each transcript is signed at run time
+// under keys generated for the test. ../python/test_verify.py builds the same
+// cases and expects the same lines.
+func TestChecksReadTheChallengeBody(t *testing.T) {
+	a := newProbeAgent(t, "did:opena2a:agent:probe_a")
+	b := newProbeAgent(t, "did:opena2a:agent:probe_b")
+	seen, fresh := probeBytes(1, 16), probeBytes(2, 16)
+	cb := probeChallenge(a, fresh)
+	replayed := probeChallenge(a, seen)
+	state := func(issuers []string, bound ...probeAgent) VerifierState {
+		vs := VerifierState{ClockRFC3339: "2026-05-28T00:00:00Z", TrustedIssuers: issuers, SeenNonces: []string{seen}}
+		for _, p := range bound {
+			vs.AgentBindings = append(vs.AgentBindings, p.binding())
+		}
+		return vs
+	}
+	trusted := []string{probeIssuer}
+	otherIssuer := []string{"did:opena2a:authority:other.example"}
+	expired := state(otherIssuer, a)
+	expired.ClockRFC3339 = "2026-05-28T00:05:00Z"
+	notTrusted := "challenge.issuerDid " + probeIssuer + " is not in verifierState.trustedIssuers"
+
+	cases := []struct {
+		name     string
+		cr       ChallengeResponse
+		vs       VerifierState
+		category string // empty for ACCEPT
+		line     string
+	}{
+		{"the challenged agent answers", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(trusted, a),
+			"", "signature: ed25519=true (verified against agentDid " + a.did + " bound key)"},
+		{"the response echoes a nonce the challenge body does not carry",
+			ChallengeResponse{replayed, probeAnswer(replayed, a, a.did, func(r *ResponseBody) { r.Nonce = fresh })}, state(trusted, a),
+			"SIGNATURE_INVALID", "response.nonce does not match challenge.nonce"},
+		{"the challenge body's nonce was already seen", ChallengeResponse{replayed, probeAnswer(replayed, a, a.did, nil)}, state(trusted, a),
+			"NONCE_REPLAY", "challenge.nonce was already seen by the verifier"},
+		{"another agent answers under its own key and DID", ChallengeResponse{cb, probeAnswer(cb, b, b.did, nil)}, state(trusted, a, b),
+			"SIGNATURE_INVALID", "response.agentDid does not match challenge.agentDid"},
+		{"another agent's key echoes the challenged agent's DID", ChallengeResponse{cb, probeAnswer(cb, b, a.did, nil)}, state(trusted, a, b),
+			"UNTRUSTED_KEY", fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)",
+				a.did, hex.EncodeToString(b.publicKey())[:16], hex.EncodeToString(a.publicKey())[:16])},
+		{"the challenged agent has no binding", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(trusted, b),
+			"UNTRUSTED_KEY", "challenge.agentDid " + a.did + " has no agentBinding in verifierState"},
+		{"the response echoes another challenge",
+			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.Challenge = probeBytes(8, 32) })}, state(trusted, a),
+			"SIGNATURE_INVALID", "response.challenge does not match challenge.challenge"},
+		{"the response echoes issuedAt in another spelling of the same instant",
+			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.IssuedAt = "2026-05-27T23:58:00+00:00" })}, state(trusted, a),
+			"SIGNATURE_INVALID", "response.issuedAt does not match challenge.issuedAt"},
+		{"the response echoes another expiresAt",
+			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.ExpiresAt = "2026-05-28T00:13:00Z" })}, state(trusted, a),
+			"SIGNATURE_INVALID", "response.expiresAt does not match challenge.expiresAt"},
+		{"an echo that differs under an unbound key",
+			ChallengeResponse{replayed, probeAnswer(replayed, b, a.did, func(r *ResponseBody) { r.Nonce = fresh })}, state(trusted, a),
+			"SIGNATURE_INVALID", "response.nonce does not match challenge.nonce"},
+		{"the issuer is not trusted", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(otherIssuer, a),
+			"UNTRUSTED_ISSUER", notTrusted},
+		{"no issuer is trusted", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(nil, a),
+			"UNTRUSTED_ISSUER", notTrusted},
+		{"an expired challenge from an untrusted issuer", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, expired,
+			"CHALLENGE_EXPIRED", "verifier clock 2026-05-28T00:05:00Z is not before challenge.expiresAt 2026-05-28T00:03:00Z"},
+		{"a seen nonce from an untrusted issuer", ChallengeResponse{replayed, probeAnswer(replayed, a, a.did, nil)}, state(otherIssuer, a),
+			"NONCE_REPLAY", "challenge.nonce was already seen by the verifier"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expected := ExpectedOutcome{VerifyResult: "ACCEPT"}
+			if tc.category != "" {
+				expected = ExpectedOutcome{VerifyResult: "REJECT", RejectCategory: tc.category}
+			}
+			cr := tc.cr
+			doc, err := json.MarshalIndent(Fixture{
+				Name:              "probe",
+				FixtureType:       "challengeResponse",
+				VerifierState:     tc.vs,
+				Expected:          expected,
+				ChallengeResponse: &cr,
+			}, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, code, out := runText(t, string(doc)+"\n")
+			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestRepeatedChallengeResponseMemberIsALoadError: challengeResponse is
+// fixture format around the two §5.1 bodies, so a member it writes twice
+// fails the fixture to load with the line of the other repeated members, and
+// a member spelled in another case is not read as challenge or response. A
+// member repeated inside a body is not a load error. The cases are built from
+// the valid fixture. ../python/test_verify.py builds the same cases and
+// expects the same lines.
+func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	container := memberText(t, doc, "challengeResponse")
+	var bodies map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(container, `"challengeResponse": `)), &bodies); err != nil {
+		t.Fatal(err)
+	}
+	challenge, response := string(bodies["challenge"]), string(bodies["response"])
+	// with returns body with member name set to value, or left out when value is nil.
+	with := func(body, name string, value any) string {
+		var members map[string]any
+		if err := json.Unmarshal([]byte(body), &members); err != nil {
+			t.Fatal(err)
+		}
+		if value == nil {
+			delete(members, name)
+		} else {
+			members[name] = value
+		}
+		out, err := json.Marshal(members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	// withContainer returns doc with challengeResponse written as members.
+	withContainer := func(members ...string) string {
+		return strings.Replace(doc, container, `"challengeResponse": {`+strings.Join(members, ", ")+`}`, 1)
+	}
+	m := func(name, value string) string { return strconv.Quote(name) + ": " + value }
+	keyID := memberText(t, response, "keyId")
+
+	repeats := []struct{ name, doc, member string }{
+		{"response twice, the later copy without nonce", withContainer(m("challenge", challenge), m("response", response), m("response", with(response, "nonce", nil))), "challengeResponse.response"},
+		{"response twice, both copies the same", withContainer(m("challenge", challenge), m("response", response), m("response", response)), "challengeResponse.response"},
+		{"challenge twice, the later copy with another nonce", withContainer(m("challenge", challenge), m("challenge", with(challenge, "nonce", probeBytes(3, 16))), m("response", response)), "challengeResponse.challenge"},
+		{"another member twice", withContainer(m("challenge", challenge), m("response", response), m("note", "1"), m("note", "2")), "challengeResponse.note"},
+	}
+	for _, tc := range repeats {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, "parse error: "+tc.member+": duplicate member name"); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepts := []struct{ name, doc string }{
+		{"Response beside response, with another signature", withContainer(m("challenge", challenge), m("response", response), m("Response", with(response, "signature", probeBytes(0, 64))))},
+		{"Challenge beside challenge, with another nonce", withContainer(m("challenge", challenge), m("Challenge", with(challenge, "nonce", probeBytes(3, 16))), m("response", response))},
+		{"keyId twice inside the response body, both copies the same", withContainer(m("challenge", challenge), m("response", strings.Replace(response, keyID, keyID+", "+keyID, 1)))},
+	}
+	for _, tc := range accepts {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			want := passBlock(path, "", "signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)")
+			if code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError: a
+// trustedIssuers, agentBindings or seenNonces member of verifierState that is
+// present must be an array or null; null and a missing member read as the
+// empty array. Any other value fails the fixture when it loads, so before the
+// signature check and for every fixture type, with one line naming the member
+// and the value's JSON type; of two such members, the line names the first
+// of agentBindings, seenNonces and trustedIssuers, in that order, whichever
+// is written first. The cases are built from the valid fixture.
+// ../python/test_verify.py builds the same cases and expects the same lines.
+func TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	var valid Fixture
+	if err := json.Unmarshal(raw, &valid); err != nil {
+		t.Fatal(err)
+	}
+	cb := valid.ChallengeResponse.Challenge
+	binding, err := json.Marshal(valid.VerifierState.AgentBindings[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(text, name, value string) string {
+		return strings.Replace(text, memberText(t, text, name), strconv.Quote(name)+": "+value, 1)
+	}
+	state := memberText(t, doc, "verifierState")
+	without := func(name string) string {
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(state, `"verifierState": `)), &members); err != nil {
+			t.Fatal(err)
+		}
+		delete(members, name)
+		out, err := json.Marshal(members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Replace(doc, state, `"verifierState": `+string(out), 1)
+	}
+	expecting := func(text, category string) string {
+		return set(text, "expected", `{"verifyResult": "REJECT", "rejectCategory": "`+category+`"}`)
+	}
+
+	values := []struct{ value, kind string }{
+		{"0", "a number"}, {"7", "a number"}, {"false", "a boolean"}, {"true", "a boolean"},
+		{`""`, "a string"}, {"{}", "an object"},
+	}
+	lookalike := map[string]struct{ value, kind string }{
+		"trustedIssuers": {strconv.Quote(cb.IssuerDID), "a string"},
+		"agentBindings":  {string(binding), "an object"},
+		"seenNonces":     {strconv.Quote(cb.Nonce), "a string"},
+	}
+	for _, name := range []string{"trustedIssuers", "agentBindings", "seenNonces"} {
+		for _, v := range append(values, lookalike[name]) {
+			t.Run(name+" "+v.value, func(t *testing.T) {
+				path, code, out := runText(t, set(doc, name, v.value))
+				if want := failBlock(path, "fixture error: verifierState."+name+": "+v.kind+", not an array"); code != 1 || out != want {
+					t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+				}
+			})
+		}
+	}
+
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadErrors := []struct{ name, doc, line string }{
+		{"seenNonces 0 under a signature that does not verify",
+			strings.Replace(set(doc, "seenNonces", "0"), `"issuedAt": "`+cb.IssuedAt+`"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 1),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+		{"seenNonces 0 in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"seenNonces": 0}`),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+		{"two members that are not arrays, seenNonces written first",
+			set(doc, "verifierState", `{"seenNonces": 0, "clockRfc3339": "`+valid.VerifierState.ClockRFC3339+`", "trustedIssuers": "", "agentBindings": []}`),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+		{"two members that are not arrays, trustedIssuers written first",
+			set(set(doc, "seenNonces", "0"), "trustedIssuers", `""`),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+	}
+	for _, tc := range loadErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
+	noBinding := "challenge.agentDid " + cb.AgentDID + " has no agentBinding in verifierState"
+	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
+	empties := []struct{ name, doc, category, line string }{
+		{"seenNonces null", set(doc, "seenNonces", "null"), "", accepted},
+		{"no seenNonces", without("seenNonces"), "", accepted},
+		{"agentBindings null", expecting(set(doc, "agentBindings", "null"), "UNTRUSTED_KEY"), "UNTRUSTED_KEY", noBinding},
+		{"no agentBindings", expecting(without("agentBindings"), "UNTRUSTED_KEY"), "UNTRUSTED_KEY", noBinding},
+		{"trustedIssuers null", expecting(set(doc, "trustedIssuers", "null"), "UNTRUSTED_ISSUER"), "UNTRUSTED_ISSUER", notTrusted},
+		{"no trustedIssuers", expecting(without("trustedIssuers"), "UNTRUSTED_ISSUER"), "UNTRUSTED_ISSUER", notTrusted},
+	}
+	for _, tc := range empties {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// loadErrorLines is the line both verifiers print for each fixture under
+// fixtures/load-errors/; ../python/test_verify.py holds the same lines.
+var loadErrorLines = map[string]string{
+	"challenge-response-repeated-challenge.json":       "parse error: challengeResponse.challenge: duplicate member name",
+	"challenge-response-repeated-response.json":        "parse error: challengeResponse.response: duplicate member name",
+	"verifier-state-agent-bindings-not-an-array.json":  "fixture error: verifierState.agentBindings: an object, not an array",
+	"verifier-state-seen-nonces-not-an-array.json":     "fixture error: verifierState.seenNonces: a number, not an array",
+	"verifier-state-trusted-issuers-not-an-array.json": "fixture error: verifierState.trustedIssuers: a string, not an array",
+}
+
+// TestLoadErrorFixturesFailToLoad runs the verifier over fixtures/load-errors/,
+// the fixtures MANIFEST.sha256 pins that no conforming verifier loads: each
+// fails with its line in loadErrorLines, and the run exits 1.
+func TestLoadErrorFixturesFailToLoad(t *testing.T) {
+	dir := filepath.Join("..", "..", "fixtures", "load-errors")
+	names, err := fs.Glob(os.DirFS(dir), "*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(names)
+	listed := make([]string, 0, len(loadErrorLines))
+	for name := range loadErrorLines {
+		listed = append(listed, name)
+	}
+	sort.Strings(listed)
+	if strings.Join(names, ",") != strings.Join(listed, ",") {
+		t.Fatalf("fixtures/load-errors holds %v, loadErrorLines lists %v", names, listed)
+	}
+	var want strings.Builder
+	for _, name := range names {
+		want.WriteString("FAIL  " + filepath.Join(dir, name) + "\n       " + loadErrorLines[name] + "\n")
+	}
+	fmt.Fprintf(&want, "\nsummary: 0 pass, %d fail (%d fixtures)\n", len(names), len(names))
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{dir}, &stdout, &stderr); code != 1 || stdout.String() != want.String() || stderr.Len() != 0 {
+		t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 1, stdout:\n%s", code, &stdout, &stderr, want.String())
+	}
 }

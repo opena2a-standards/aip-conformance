@@ -10,6 +10,13 @@
 //   - challenge-response-stale-challenge    AIP §5.1 5-minute expiry check (REJECT CHALLENGE_EXPIRED)
 //   - challenge-response-replay             AIP §5.1 nonce-uniqueness check (REJECT NONCE_REPLAY)
 //
+// Added in v0.3:
+//   - challenge-response-echoed-nonce-differs  AIP §5.1 echoed fields equal the challenge body's (REJECT SIGNATURE_INVALID)
+//   - challenge-response-echoed-agent-differs  AIP §5.1 echoed fields equal the challenge body's (REJECT SIGNATURE_INVALID)
+//   - challenge-response-other-agent-key       AIP §5.1 key bound to the challenge's agentDid (REJECT UNTRUSTED_KEY)
+//   - challenge-response-untrusted-issuer      AIP §5.1 trusted-issuer check (REJECT UNTRUSTED_ISSUER)
+//   - load-errors/*                            fixtures both reference verifiers refuse to load
+//
 // Canonical signing form (AIP §5.1, this suite's pinning):
 //
 //	canonical = "{challenge}|{agentDid}|{nonce}|{issuedAt}|{expiresAt}"
@@ -24,10 +31,12 @@
 // Keypair reuse: issuer-primary is the SAME bytes as
 // atx-conformance/vectors/issuer-primary.json and
 // atp-conformance/vectors/issuer-primary.json (RFC 8032 §7.1 Test 1).
-// agent-bound-key is RFC 8032 §7.1 Test 2; agent-unbound-key is Test 3.
+// agent-bound-key is RFC 8032 §7.1 Test 2; agent-unbound-key is Test 3;
+// agent-second-key, the bound key of a second agent, is TEST 1024.
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -362,6 +371,15 @@ var (
 	replayIssuedAt  = "2026-05-27T23:59:00Z"
 	replayExpiresAt = "2026-05-28T00:04:00Z" // not yet expired
 	replaySignedAt  = "2026-05-27T23:59:30Z"
+
+	// Fixture 8 (echoed-nonce-differs) — the replay transcript's response
+	// echoes this nonce, which the verifier has not seen, in place of the
+	// challenge body's
+	echoedNonce = detB64Raw("aip-conformance-v0.3-nonce-echoed", 16)
+
+	// Fixture 11 (untrusted-issuer) — the one issuer the verifier trusts,
+	// which is not the challenge's issuerDid
+	otherIssuerDID = "did:opena2a:authority:example.org"
 )
 
 // ---------------------------------------------------------------------------
@@ -393,12 +411,119 @@ func baseVerifierState(boundKey KeyVector) VerifierState {
 	}
 }
 
+// answer is the response returned for cb: the five challenge fields echoed,
+// with agentDID as the echoed agentDid, signed over cb's canonical payload
+// with signer's seed and carrying signer's public key and keyId.
+func answer(cb ChallengeBody, agentDID string, signer KeyVector, signedAt string) ResponseBody {
+	return ResponseBody{
+		AgentDID:  agentDID,
+		Challenge: cb.Challenge,
+		Nonce:     cb.Nonce,
+		IssuedAt:  cb.IssuedAt,
+		ExpiresAt: cb.ExpiresAt,
+		Signature: signEd25519(signer.SeedHex, canonicalChallengeResponsePayload(cb)),
+		PublicKey: publicKeyB64Raw(signer.SeedHex),
+		KeyID:     signer.KeyID,
+		SignedAt:  signedAt,
+		Algorithm: "Ed25519",
+	}
+}
+
+// bindingFor is the verifierState.agentBindings entry that binds kv's public
+// key to agentDID.
+func bindingFor(agentDID string, kv KeyVector) AgentBinding {
+	return AgentBinding{AgentDID: agentDID, Algorithm: "Ed25519", PublicKeyHex: kv.PublicKeyHex}
+}
+
+// object is a JSON object written member by member, in order, a name
+// written twice included, with each value as json.Marshal writes it. The
+// load-error fixtures need it: a struct cannot write a member twice, or hold
+// a value of the wrong JSON type for its field.
+type object []member
+
+type member struct {
+	name  string
+	value any
+}
+
+func (o object) MarshalJSON() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, m := range o {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		name, err := json.Marshal(m.name)
+		if err != nil {
+			return nil, err
+		}
+		value, err := json.Marshal(m.value)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(name)
+		b.WriteByte(':')
+		b.Write(value)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
+}
+
+// verifierStateWith is baseVerifierState(boundKey) written as an object, with
+// the member name holding value.
+func verifierStateWith(boundKey KeyVector, name string, value any) object {
+	vs := baseVerifierState(boundKey)
+	members := object{
+		{"clockRfc3339", vs.ClockRFC3339},
+		{"trustedIssuers", vs.TrustedIssuers},
+		{"agentBindings", vs.AgentBindings},
+		{"seenNonces", vs.SeenNonces},
+	}
+	for i := range members {
+		if members[i].name == name {
+			members[i].value = value
+		}
+	}
+	return members
+}
+
+// loadErrorFixture is the challenge-response-valid fixture with its
+// verifierState and challengeResponse members given as written, for a
+// fixture both reference verifiers refuse to load. Its expected member is
+// the valid fixture's ACCEPT, which no conforming verifier reaches.
+func loadErrorFixture(name, description string, keypairRefs []KeypairRef, verifierState, challengeResponse any) object {
+	return object{
+		{"$schema", "https://aip.opena2a.org/schemas/fixture-v1.json"},
+		{"name", "aip-v0.3/load-errors/" + name},
+		{"description", description},
+		{"fixtureType", "challengeResponse"},
+		{"spec", specRefs("§5.1 Challenge-Response Protocol")},
+		{"keypairRefs", keypairRefs},
+		{"verifierState", verifierState},
+		{"expected", ExpectedOutcome{VerifyResult: "ACCEPT"}},
+		{"challengeResponse", challengeResponse},
+	}
+}
+
 func main() {
 	outDir = mustResolveOutDir()
 
 	primary := mustLoadKeyVector("vectors/issuer-primary.json")
 	agentBound := mustLoadKeyVector("vectors/agent-bound-key.json")
 	agentUnbound := mustLoadKeyVector("vectors/agent-unbound-key.json")
+	agentSecond := mustLoadKeyVector("vectors/agent-second-key.json")
+
+	// The challenge-response-valid transcript, which fixtures 9-11 and the
+	// load-error fixtures start from.
+	validBody := ChallengeBody{
+		Challenge: validChallenge,
+		AgentDID:  testAgentDID,
+		Nonce:     validNonce,
+		IssuedAt:  validIssuedAt,
+		ExpiresAt: validExpiresAt,
+		IssuerDID: testIssuerDID,
+	}
+	validResponse := answer(validBody, testAgentDID, agentBound, validSignedAt)
 
 	type fixtureSpec struct {
 		writePath string
@@ -678,12 +803,184 @@ func main() {
 				TrustScoreComposition: &TrustScoreComposition{Factors: factors},
 			}
 		}},
+
+		// ----------------------------------------------------------------
+		// Fixture 8: challenge-response-echoed-nonce-differs (REJECT SIGNATURE_INVALID)
+		// ----------------------------------------------------------------
+		{"fixtures/challenge-response-echoed-nonce-differs.json", func() Fixture {
+			// The replay transcript: its challenge body carries fixture 1's
+			// nonce, which verifierState lists as seen. Only the response's
+			// echo of the nonce changes.
+			cb := ChallengeBody{
+				Challenge: replayChallenge,
+				AgentDID:  testAgentDID,
+				Nonce:     validNonce,
+				IssuedAt:  replayIssuedAt,
+				ExpiresAt: replayExpiresAt,
+				IssuerDID: testIssuerDID,
+			}
+			rb := answer(cb, testAgentDID, agentBound, replaySignedAt)
+			rb.Nonce = echoedNonce
+			vs := baseVerifierState(agentBound)
+			vs.SeenNonces = []string{validNonce}
+			return Fixture{
+				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
+				Name:        "aip-v0.3/challenge-response-echoed-nonce-differs",
+				Description: "The challenge-response-replay transcript with one edit: the response echoes a nonce the verifier has not seen, while the challenge body, which the signature covers, carries the nonce listed in verifierState.seenNonces. The signature verifies under the agent's bound key and the challenge has not expired. Each of the five fields the response echoes must equal the challenge body's, and the nonce check reads the challenge body. Verifier MUST REJECT with SIGNATURE_INVALID.",
+				FixtureType: "challengeResponse",
+				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: the five fields the response echoes equal the challenge body's"),
+				KeypairRefs: []KeypairRef{
+					keypairRefFor(primary, "vectors/issuer-primary.json"),
+					keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+				},
+				VerifierState: vsPtr(vs),
+				Expected: ExpectedOutcome{
+					VerifyResult:   "REJECT",
+					RejectCategory: "SIGNATURE_INVALID",
+					ReasonContains: "response.nonce",
+				},
+				ChallengeResponse: &ChallengeResponse{Challenge: cb, Response: rb},
+			}
+		}},
+
+		// ----------------------------------------------------------------
+		// Fixture 9: challenge-response-echoed-agent-differs (REJECT SIGNATURE_INVALID)
+		// ----------------------------------------------------------------
+		{"fixtures/challenge-response-echoed-agent-differs.json", func() Fixture {
+			vs := baseVerifierState(agentBound)
+			vs.AgentBindings = append(vs.AgentBindings, bindingFor(agentSecond.AgentDID, agentSecond))
+			return Fixture{
+				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
+				Name:        "aip-v0.3/challenge-response-echoed-agent-differs",
+				Description: "An AIP §5.1 transcript whose challenge was minted for agent_conformance_test_001 and whose response is signed with the key bound to agent_conformance_test_002 and echoes that agent's DID. verifierState binds both agents' keys. The signature verifies over the challenge body, but the echoed agentDid is not the challenge body's. Each of the five fields the response echoes must equal the challenge body's, and the bound-key check reads the challenge body's agentDid. Verifier MUST REJECT with SIGNATURE_INVALID.",
+				FixtureType: "challengeResponse",
+				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: the five fields the response echoes equal the challenge body's"),
+				KeypairRefs: []KeypairRef{
+					keypairRefFor(primary, "vectors/issuer-primary.json"),
+					keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+					keypairRefFor(agentSecond, "vectors/agent-second-key.json"),
+				},
+				VerifierState: vsPtr(vs),
+				Expected: ExpectedOutcome{
+					VerifyResult:   "REJECT",
+					RejectCategory: "SIGNATURE_INVALID",
+					ReasonContains: "response.agentDid",
+				},
+				ChallengeResponse: &ChallengeResponse{
+					Challenge: validBody,
+					Response:  answer(validBody, agentSecond.AgentDID, agentSecond, validSignedAt),
+				},
+			}
+		}},
+
+		// ----------------------------------------------------------------
+		// Fixture 10: challenge-response-other-agent-key (REJECT UNTRUSTED_KEY)
+		// ----------------------------------------------------------------
+		{"fixtures/challenge-response-other-agent-key.json", func() Fixture {
+			vs := baseVerifierState(agentBound)
+			vs.AgentBindings = append(vs.AgentBindings, bindingFor(agentSecond.AgentDID, agentSecond))
+			return Fixture{
+				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
+				Name:        "aip-v0.3/challenge-response-other-agent-key",
+				Description: "An AIP §5.1 transcript whose challenge was minted for agent_conformance_test_001 and whose response echoes every challenge field but is signed with the key bound to agent_conformance_test_002. verifierState binds both agents' keys. The signature verifies, but the presented publicKey is not the key bound to the challenge's agentDid. Verifier MUST REJECT with UNTRUSTED_KEY.",
+				FixtureType: "challengeResponse",
+				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: publicKey matches the key bound to the challenge's agentDid"),
+				KeypairRefs: []KeypairRef{
+					keypairRefFor(primary, "vectors/issuer-primary.json"),
+					keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+					keypairRefFor(agentSecond, "vectors/agent-second-key.json"),
+				},
+				VerifierState: vsPtr(vs),
+				Expected: ExpectedOutcome{
+					VerifyResult:   "REJECT",
+					RejectCategory: "UNTRUSTED_KEY",
+					ReasonContains: "publicKey does not match",
+				},
+				ChallengeResponse: &ChallengeResponse{
+					Challenge: validBody,
+					Response:  answer(validBody, testAgentDID, agentSecond, validSignedAt),
+				},
+			}
+		}},
+
+		// ----------------------------------------------------------------
+		// Fixture 11: challenge-response-untrusted-issuer (REJECT UNTRUSTED_ISSUER)
+		// ----------------------------------------------------------------
+		{"fixtures/challenge-response-untrusted-issuer.json", func() Fixture {
+			vs := baseVerifierState(agentBound)
+			vs.TrustedIssuers = []string{otherIssuerDID}
+			return Fixture{
+				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
+				Name:        "aip-v0.3/challenge-response-untrusted-issuer",
+				Description: "The challenge-response-valid transcript under a verifierState whose trustedIssuers does not hold the challenge's issuerDid. The signature verifies under the agent's bound key, the challenge has not expired and the nonce is unseen; the trusted-issuer check runs after those four. Verifier MUST REJECT with UNTRUSTED_ISSUER.",
+				FixtureType: "challengeResponse",
+				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: issuerDid is a trusted issuer"),
+				KeypairRefs: []KeypairRef{
+					keypairRefFor(primary, "vectors/issuer-primary.json"),
+					keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+				},
+				VerifierState: vsPtr(vs),
+				Expected: ExpectedOutcome{
+					VerifyResult:   "REJECT",
+					RejectCategory: "UNTRUSTED_ISSUER",
+					ReasonContains: "issuerDid",
+				},
+				ChallengeResponse: &ChallengeResponse{Challenge: validBody, Response: validResponse},
+			}
+		}},
+	}
+
+	// Load-error fixtures: the valid fixture with one edit that makes both
+	// reference verifiers refuse to load it. They sit outside fixtures/*.json,
+	// so no verifier walk of fixtures/ reads them; MANIFEST.sha256 pins them.
+	validKeys := []KeypairRef{
+		keypairRefFor(primary, "vectors/issuer-primary.json"),
+		keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+	}
+	validState := baseVerifierState(agentBound)
+	loadErrors := []struct {
+		writePath string
+		build     func() object
+	}{
+		{"fixtures/load-errors/challenge-response-repeated-challenge.json", func() object {
+			return loadErrorFixture("challenge-response-repeated-challenge",
+				"The challenge-response-valid fixture with one edit: challengeResponse writes its challenge member twice, both copies the same. A JSON object outside the two §5.1 bodies that writes one member name twice has no single reading. A verifier MUST refuse to load the fixture; the expected member is the valid fixture's and is never reached.",
+				validKeys, validState,
+				object{{"challenge", validBody}, {"challenge", validBody}, {"response", validResponse}})
+		}},
+		{"fixtures/load-errors/challenge-response-repeated-response.json", func() object {
+			return loadErrorFixture("challenge-response-repeated-response",
+				"The challenge-response-valid fixture with one edit: challengeResponse writes its response member twice, both copies the same. A JSON object outside the two §5.1 bodies that writes one member name twice has no single reading. A verifier MUST refuse to load the fixture; the expected member is the valid fixture's and is never reached.",
+				validKeys, validState,
+				object{{"challenge", validBody}, {"response", validResponse}, {"response", validResponse}})
+		}},
+		{"fixtures/load-errors/verifier-state-seen-nonces-not-an-array.json", func() object {
+			return loadErrorFixture("verifier-state-seen-nonces-not-an-array",
+				"The challenge-response-valid fixture with one edit: verifierState.seenNonces is the number 0. A trustedIssuers, agentBindings or seenNonces member of verifierState that is present must be an array or null. A verifier MUST refuse to load the fixture; the expected member is the valid fixture's and is never reached.",
+				validKeys, verifierStateWith(agentBound, "seenNonces", 0),
+				ChallengeResponse{Challenge: validBody, Response: validResponse})
+		}},
+		{"fixtures/load-errors/verifier-state-agent-bindings-not-an-array.json", func() object {
+			return loadErrorFixture("verifier-state-agent-bindings-not-an-array",
+				"The challenge-response-valid fixture with one edit: verifierState.agentBindings is an empty object. A trustedIssuers, agentBindings or seenNonces member of verifierState that is present must be an array or null. A verifier MUST refuse to load the fixture; the expected member is the valid fixture's and is never reached.",
+				validKeys, verifierStateWith(agentBound, "agentBindings", object{}),
+				ChallengeResponse{Challenge: validBody, Response: validResponse})
+		}},
+		{"fixtures/load-errors/verifier-state-trusted-issuers-not-an-array.json", func() object {
+			return loadErrorFixture("verifier-state-trusted-issuers-not-an-array",
+				"The challenge-response-valid fixture with one edit: verifierState.trustedIssuers is an empty string. A trustedIssuers, agentBindings or seenNonces member of verifierState that is present must be an array or null. A verifier MUST refuse to load the fixture; the expected member is the valid fixture's and is never reached.",
+				validKeys, verifierStateWith(agentBound, "trustedIssuers", ""),
+				ChallengeResponse{Challenge: validBody, Response: validResponse})
+		}},
 	}
 
 	manifest := make(map[string]string)
 	for _, fs := range fixtures {
 		f := fs.build()
 		writeFixture(fs.writePath, f, manifest)
+	}
+	for _, le := range loadErrors {
+		writeFixture(le.writePath, le.build(), manifest)
 	}
 	writeManifest("MANIFEST.sha256", manifest)
 }
@@ -692,7 +989,7 @@ func main() {
 // io helpers
 // ---------------------------------------------------------------------------
 
-func writeFixture(relPath string, f Fixture, manifest map[string]string) {
+func writeFixture(relPath string, f any, manifest map[string]string) {
 	abs := filepath.Join(outDir, relPath)
 	must(os.MkdirAll(filepath.Dir(abs), 0o755))
 

@@ -1,15 +1,17 @@
 """Regression tests for verify.py: a fixture that writes one member name
-twice in a JSON object outside challengeResponse fails to load, a member
+twice in a JSON object outside the two §5.1 bodies fails to load, a member
 spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
-next fixture, a verifierState agentBindings or seenNonces that is not an
-array or null is a fixture error, a timestamp with no UTC offset is not
-read in the machine's local time zone, a timestamp is read, signed and
-compared as the Go verifier reads, signs and compares it, and the walk
-that looks for a repeated member name stays within a memory bound over
-10,000 nested arrays and a time bound over 9,999 nested arrays around
-1,000,000 zeros.
+next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
+that is not an array or null is a fixture error, a timestamp with no UTC
+offset is not read in the machine's local time zone, a timestamp is read,
+signed and compared as the Go verifier reads, signs and compares it, and
+the walk that looks for a repeated member name stays within a memory bound
+over 10,000 nested arrays and a time bound over 9,999 nested arrays around
+1,000,000 zeros. The §5.1 checks read the challenge body: the five fields a
+response echoes must equal it, the bound-key and nonce checks read its
+agentDid and nonce, and the trusted-issuer check runs fifth.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -31,6 +33,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterator
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import verify
@@ -38,6 +41,8 @@ import verify
 FIXTURES = Path(__file__).resolve().parent.parent.parent / "fixtures"
 REPLAY = FIXTURES / "challenge-response-replay.json"
 VALID = FIXTURES / "challenge-response-valid.json"
+COMPOSITION = FIXTURES / "trust-score-measured-at-included-weight-0.50.json"
+LOAD_ERRORS = FIXTURES / "load-errors"
 AGENT_BOUND_KEY = FIXTURES.parent / "vectors" / "agent-bound-key.json"
 
 # The local time zones the time-zone tests run under, each with its UTC
@@ -189,7 +194,7 @@ class RepeatedWrapperMemberTest(unittest.TestCase):
     def test_case_variant_and_shipped_fixture_keep_the_verdict(self) -> None:
         verdict = (
             "       expected: REJECT [NONCE_REPLAY]\n"
-            "       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]\n\n"
+            "       observed: REJECT[NONCE_REPLAY: challenge.nonce was already seen by the verifier]\n\n"
             "summary: 1 pass, 0 fail (1 fixtures)\n"
         )
         with self.subTest("VerifierState after verifierState"):
@@ -389,8 +394,14 @@ class UnreadableFixtureTest(unittest.TestCase):
                 )
 
     def test_other_error_is_reported_with_its_type(self) -> None:
-        text = edited(self.text, lambda d: d["challengeResponse"]["response"].pop("agentDid"))
-        self.assert_fails_then_valid_passes(text, "error: KeyError: 'agentDid'")
+        # A missing echo reads as the empty string, so with agentDid removed
+        # from both bodies the echo matches and the canonical payload reads
+        # the challenge's agentDid.
+        def edit(d: dict) -> None:
+            for body in d["challengeResponse"].values():
+                body.pop("agentDid")
+
+        self.assert_fails_then_valid_passes(edited(self.text, edit), "error: KeyError: 'agentDid'")
 
     def test_signature_reject_does_not_read_verifier_state(self) -> None:
         """The signature check runs before any check reads verifierState, so
@@ -400,6 +411,7 @@ class UnreadableFixtureTest(unittest.TestCase):
         def edit(d: dict) -> None:
             d["verifierState"] = None
             d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
+            d["challengeResponse"]["response"]["issuedAt"] = "2026-05-27T23:59:00Z"
             d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"}
 
         path, code, out, err = run_text(edited(self.text, edit))
@@ -497,7 +509,8 @@ class NoUtcOffsetTest(unittest.TestCase):
     and an expiresAt the verifier does not read, under a signature made
     over it as written, is rejected as CHALLENGE_EXPIRED: for each challenge
     case, the verdict and category that ../go/verify.go gives the same
-    file. The cases are built from the valid fixture."""
+    file. The cases are built from the valid fixture, with the response
+    echoing the challenge's edited member."""
 
     def setUp(self) -> None:
         self.text = VALID.read_text(encoding="utf-8")
@@ -558,7 +571,10 @@ class NoUtcOffsetTest(unittest.TestCase):
         for member, value, signed, category, reason in cases:
 
             def edit(d: dict) -> None:
-                d["challengeResponse"]["challenge"][member] = value
+                # The checks compare the response's echo of the member with
+                # the challenge's, as written, before the signature check.
+                for body in d["challengeResponse"].values():
+                    body[member] = value
                 if signed:
                     sign_as_written(d)
                 d["expected"] = {"verifyResult": "REJECT", "rejectCategory": category}
@@ -629,9 +645,9 @@ class TimestampTest(unittest.TestCase):
     same UTC time, and a timestamp outside it is signed as written: each
     case in READ_TIMESTAMPS and UNREAD_TIMESTAMPS gets the verdict and
     category that ../go/verify.go gives the same file, as a challenge
-    issuedAt or expiresAt under the shipped signature or under one made
-    over the payload the verifier builds. The cases are built from the
-    valid fixture."""
+    issuedAt or expiresAt that the response echoes as written, under the
+    shipped signature or under one made over the payload the verifier
+    builds. The cases are built from the valid fixture."""
 
     def setUp(self) -> None:
         self.text = VALID.read_text(encoding="utf-8")
@@ -676,6 +692,7 @@ class TimestampTest(unittest.TestCase):
             def set_member(member: str, sign: bool = False) -> Callable[[dict], None]:
                 def edit(d: dict) -> None:
                     d["challengeResponse"]["challenge"][member] = value
+                    d["challengeResponse"]["response"][member] = value
                     if sign:
                         sign_as_written(d, **{member: signed})
 
@@ -709,6 +726,433 @@ class TimestampTest(unittest.TestCase):
             "CHALLENGE_EXPIRED",
             "verifier clock 10000-01-01T00:59:59Z is not before challenge.expiresAt 2026-05-28T00:03:00Z",
         )
+
+
+# The issuer of every transcript the tests build at run time.
+PROBE_ISSUER = "did:opena2a:authority:issuer.example"
+
+
+def b64(raw: bytes) -> str:
+    """raw as unpadded base64."""
+    return base64.b64encode(raw).decode("ascii").rstrip("=")
+
+
+def probe_bytes(b: int, n: int) -> str:
+    """n bytes, each b, as unpadded base64."""
+    return b64(bytes([b]) * n)
+
+
+class ProbeAgent:
+    """An agent DID with an Ed25519 key generated for the test run."""
+
+    def __init__(self, did: str) -> None:
+        self.did = did
+        self.key = Ed25519PrivateKey.generate()
+        self.public = self.key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+
+    def binding(self) -> dict:
+        return {"agentDid": self.did, "algorithm": "Ed25519", "publicKeyHex": self.public.hex()}
+
+
+def probe_challenge(agent: ProbeAgent, nonce: str) -> dict:
+    """A challenge body minted for agent by PROBE_ISSUER that carries nonce
+    and expires at 2026-05-28T00:03:00Z."""
+    return {
+        "challenge": probe_bytes(7, 32),
+        "agentDid": agent.did,
+        "nonce": nonce,
+        "issuedAt": "2026-05-27T23:58:00Z",
+        "expiresAt": "2026-05-28T00:03:00Z",
+        "issuerDid": PROBE_ISSUER,
+    }
+
+
+def probe_answer(cb: dict, signer: ProbeAgent, echoed_agent_did: str, **edits: str) -> dict:
+    """signer's response to cb: the five challenge fields echoed with
+    echoed_agent_did as the agentDid, then edits applied, and a signature
+    over cb's canonical payload under signer's key."""
+    response = {
+        "agentDid": echoed_agent_did,
+        "challenge": cb["challenge"],
+        "nonce": cb["nonce"],
+        "issuedAt": cb["issuedAt"],
+        "expiresAt": cb["expiresAt"],
+        "signature": b64(signer.key.sign(verify.canonical_challenge_response_payload(cb))),
+        "publicKey": b64(signer.public),
+        "keyId": signer.did + "#key-1",
+        "signedAt": "2026-05-27T23:58:30Z",
+        "algorithm": "Ed25519",
+    }
+    response.update(edits)
+    return response
+
+
+def pass_block(path: Path, category: str, line: str) -> str:
+    """The output of a run over one fixture that passes with the verdict
+    category (empty for ACCEPT) and line: the reject reason, or the note an
+    ACCEPT prints."""
+    if not category:
+        return (
+            f"PASS  {path}\n       expected: ACCEPT\n       observed: ACCEPT\n       {line}\n\n"
+            "summary: 1 pass, 0 fail (1 fixtures)\n"
+        )
+    return (
+        f"PASS  {path}\n       expected: REJECT [{category}]\n       observed: REJECT[{category}: {line}]\n\n"
+        "summary: 1 pass, 0 fail (1 fixtures)\n"
+    )
+
+
+def fail_block(path: Path, line: str) -> str:
+    """The output of a run over one fixture that fails with line."""
+    return f"FAIL  {path}\n       {line}\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
+
+
+class ChallengeBodyChecksTest(unittest.TestCase):
+    """Each of the five fields a response echoes must equal the challenge
+    body's, which the signature covers, or the transcript is REJECT
+    [SIGNATURE_INVALID] naming the field; the fields are compared as written.
+    The bound-key check reads the challenge body's agentDid and the nonce
+    check its nonce, and the trusted-issuer check runs fifth, REJECT
+    [UNTRUSTED_ISSUER]. Each transcript is signed at run time under keys
+    generated for the test. ../go/verify_test.go builds the same cases and
+    expects the same lines."""
+
+    def test_checks_read_the_challenge_body(self) -> None:
+        a = ProbeAgent("did:opena2a:agent:probe_a")
+        b = ProbeAgent("did:opena2a:agent:probe_b")
+        seen, fresh = probe_bytes(1, 16), probe_bytes(2, 16)
+        cb = probe_challenge(a, fresh)
+        replayed = probe_challenge(a, seen)
+
+        def state(issuers: object, *bound: ProbeAgent, clock: str = "2026-05-28T00:00:00Z") -> dict:
+            return {
+                "clockRfc3339": clock,
+                "trustedIssuers": issuers,
+                "agentBindings": [p.binding() for p in bound],
+                "seenNonces": [seen],
+            }
+
+        trusted = [PROBE_ISSUER]
+        other_issuer = ["did:opena2a:authority:other.example"]
+        not_trusted = f"challenge.issuerDid {PROBE_ISSUER} is not in verifierState.trustedIssuers"
+        cases = [
+            (
+                "the challenged agent answers",
+                cb, probe_answer(cb, a, a.did), state(trusted, a),
+                "", f"signature: ed25519=true (verified against agentDid {a.did} bound key)",
+            ),
+            (
+                "the response echoes a nonce the challenge body does not carry",
+                replayed, probe_answer(replayed, a, a.did, nonce=fresh), state(trusted, a),
+                "SIGNATURE_INVALID", "response.nonce does not match challenge.nonce",
+            ),
+            (
+                "the challenge body's nonce was already seen",
+                replayed, probe_answer(replayed, a, a.did), state(trusted, a),
+                "NONCE_REPLAY", "challenge.nonce was already seen by the verifier",
+            ),
+            (
+                "another agent answers under its own key and DID",
+                cb, probe_answer(cb, b, b.did), state(trusted, a, b),
+                "SIGNATURE_INVALID", "response.agentDid does not match challenge.agentDid",
+            ),
+            (
+                "another agent's key echoes the challenged agent's DID",
+                cb, probe_answer(cb, b, a.did), state(trusted, a, b),
+                "UNTRUSTED_KEY",
+                f"response.publicKey does not match bound key for agentDid {a.did} "
+                f"(got {b.public.hex()[:16]}..., bound is {a.public.hex()[:16]}...)",
+            ),
+            (
+                "the challenged agent has no binding",
+                cb, probe_answer(cb, a, a.did), state(trusted, b),
+                "UNTRUSTED_KEY", f"challenge.agentDid {a.did} has no agentBinding in verifierState",
+            ),
+            (
+                "the response echoes another challenge",
+                cb, probe_answer(cb, a, a.did, challenge=probe_bytes(8, 32)), state(trusted, a),
+                "SIGNATURE_INVALID", "response.challenge does not match challenge.challenge",
+            ),
+            (
+                "the response echoes issuedAt in another spelling of the same instant",
+                cb, probe_answer(cb, a, a.did, issuedAt="2026-05-27T23:58:00+00:00"), state(trusted, a),
+                "SIGNATURE_INVALID", "response.issuedAt does not match challenge.issuedAt",
+            ),
+            (
+                "the response echoes another expiresAt",
+                cb, probe_answer(cb, a, a.did, expiresAt="2026-05-28T00:13:00Z"), state(trusted, a),
+                "SIGNATURE_INVALID", "response.expiresAt does not match challenge.expiresAt",
+            ),
+            (
+                "an echo that differs under an unbound key",
+                replayed, probe_answer(replayed, b, a.did, nonce=fresh), state(trusted, a),
+                "SIGNATURE_INVALID", "response.nonce does not match challenge.nonce",
+            ),
+            (
+                "the issuer is not trusted",
+                cb, probe_answer(cb, a, a.did), state(other_issuer, a),
+                "UNTRUSTED_ISSUER", not_trusted,
+            ),
+            (
+                "no issuer is trusted",
+                cb, probe_answer(cb, a, a.did), state(None, a),
+                "UNTRUSTED_ISSUER", not_trusted,
+            ),
+            (
+                "an expired challenge from an untrusted issuer",
+                cb, probe_answer(cb, a, a.did), state(other_issuer, a, clock="2026-05-28T00:05:00Z"),
+                "CHALLENGE_EXPIRED",
+                "verifier clock 2026-05-28T00:05:00Z is not before challenge.expiresAt 2026-05-28T00:03:00Z",
+            ),
+            (
+                "a seen nonce from an untrusted issuer",
+                replayed, probe_answer(replayed, a, a.did), state(other_issuer, a),
+                "NONCE_REPLAY", "challenge.nonce was already seen by the verifier",
+            ),
+        ]
+        for name, challenge, response, vs, category, line in cases:
+            with self.subTest(name):
+                expected = {"verifyResult": "REJECT", "rejectCategory": category} if category else {"verifyResult": "ACCEPT"}
+                fixture = {
+                    "name": "probe",
+                    "fixtureType": "challengeResponse",
+                    "verifierState": vs,
+                    "expected": expected,
+                    "challengeResponse": {"challenge": challenge, "response": response},
+                }
+                path, code, out, err = run_text(json.dumps(fixture, indent=2) + "\n")
+                self.assertEqual(out, pass_block(path, category, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+
+class RepeatedChallengeResponseMemberTest(unittest.TestCase):
+    """challengeResponse is fixture format around the two §5.1 bodies, so a
+    member it writes twice fails the fixture to load with the line of the
+    other repeated members, and a member spelled in another case is not read
+    as challenge or response. A member repeated inside a body is not a load
+    error. The cases are built from the valid fixture. ../go/verify_test.go
+    builds the same cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        self.container = member_text(self.text, "challengeResponse")
+        bodies = json.loads(self.container.removeprefix('"challengeResponse": '))
+        self.challenge, self.response = bodies["challenge"], bodies["response"]
+
+    def with_container(self, *members: str) -> str:
+        """The valid fixture with challengeResponse written as members."""
+        return self.text.replace(self.container, '"challengeResponse": {' + ", ".join(members) + "}", 1)
+
+    def test_repeated_member_is_a_load_error(self) -> None:
+        def m(name: str, value: object) -> str:
+            return json.dumps(name) + ": " + json.dumps(value)
+
+        without_nonce = {k: v for k, v in self.response.items() if k != "nonce"}
+        repeats = [
+            (
+                "response twice, the later copy without nonce",
+                self.with_container(m("challenge", self.challenge), m("response", self.response), m("response", without_nonce)),
+                "challengeResponse.response",
+            ),
+            (
+                "response twice, both copies the same",
+                self.with_container(m("challenge", self.challenge), m("response", self.response), m("response", self.response)),
+                "challengeResponse.response",
+            ),
+            (
+                "challenge twice, the later copy with another nonce",
+                self.with_container(
+                    m("challenge", self.challenge),
+                    m("challenge", dict(self.challenge, nonce=probe_bytes(3, 16))),
+                    m("response", self.response),
+                ),
+                "challengeResponse.challenge",
+            ),
+            (
+                "another member twice",
+                self.with_container(m("challenge", self.challenge), m("response", self.response), m("note", 1), m("note", 2)),
+                "challengeResponse.note",
+            ),
+        ]
+        for name, text, member in repeats:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, f"parse error: {member}: duplicate member name"))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+    def test_case_variant_and_repeat_inside_a_body_keep_the_verdict(self) -> None:
+        def m(name: str, value: object) -> str:
+            return json.dumps(name) + ": " + json.dumps(value)
+
+        response = json.dumps(self.response)
+        key_id = m("keyId", self.response["keyId"])
+        accepts = [
+            (
+                "Response beside response, with another signature",
+                self.with_container(
+                    m("challenge", self.challenge),
+                    m("response", self.response),
+                    m("Response", dict(self.response, signature=probe_bytes(0, 64))),
+                ),
+            ),
+            (
+                "Challenge beside challenge, with another nonce",
+                self.with_container(
+                    m("challenge", self.challenge),
+                    m("Challenge", dict(self.challenge, nonce=probe_bytes(3, 16))),
+                    m("response", self.response),
+                ),
+            ),
+            (
+                "keyId twice inside the response body, both copies the same",
+                self.with_container(
+                    m("challenge", self.challenge),
+                    '"response": ' + response.replace(key_id, key_id + ", " + key_id, 1),
+                ),
+            ),
+        ]
+        note = "signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)"
+        for name, text in accepts:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, "", note))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+
+class VerifierStateArrayMemberTest(unittest.TestCase):
+    """A trustedIssuers, agentBindings or seenNonces member of verifierState
+    that is present must be an array or null; null and a missing member read
+    as the empty array. Any other value fails the fixture when it loads, so
+    before the signature check and for every fixture type, with one line
+    naming the member and the value's JSON type; of two such members, the
+    line names the first of agentBindings, seenNonces and trustedIssuers, in
+    that order, whichever is written first. The cases are built from the
+    valid fixture. ../go/verify_test.go builds the same cases and expects the
+    same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        doc = json.loads(self.text)
+        self.cb = doc["challengeResponse"]["challenge"]
+        self.binding = doc["verifierState"]["agentBindings"][0]
+
+    def test_value_that_is_not_an_array_is_a_fixture_error(self) -> None:
+        values = [(0, "a number"), (7, "a number"), (False, "a boolean"), (True, "a boolean"), ("", "a string"), ({}, "an object")]
+        lookalike = {
+            "trustedIssuers": (self.cb["issuerDid"], "a string"),
+            "agentBindings": (self.binding, "an object"),
+            "seenNonces": (self.cb["nonce"], "a string"),
+        }
+        for name in ("trustedIssuers", "agentBindings", "seenNonces"):
+            for value, kind in values + [lookalike[name]]:
+                with self.subTest(f"{name} {json.dumps(value)}"):
+                    path, code, out, err = run_text(
+                        edited(self.text, lambda d: d["verifierState"].update({name: value}))
+                    )
+                    self.assertEqual(out, fail_block(path, f"fixture error: verifierState.{name}: {kind}, not an array"))
+                    self.assertEqual(err, "")
+                    self.assertEqual(code, 1)
+
+    def test_fixture_error_comes_before_the_checks_and_for_every_fixture_type(self) -> None:
+        def broken_signature(d: dict) -> None:
+            d["verifierState"]["seenNonces"] = 0
+            d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        seen_nonces_line = "fixture error: verifierState.seenNonces: a number, not an array"
+        cases = [
+            ("seenNonces 0 under a signature that does not verify", edited(self.text, broken_signature), seen_nonces_line),
+            (
+                "seenNonces 0 in a trustScoreComposition fixture",
+                append_member(COMPOSITION.read_text(encoding="utf-8"), '"verifierState": {"seenNonces": 0}'),
+                seen_nonces_line,
+            ),
+            (
+                "two members that are not arrays, seenNonces written first",
+                edited(self.text, lambda d: d.update(verifierState={
+                    "seenNonces": 0,
+                    "clockRfc3339": d["verifierState"]["clockRfc3339"],
+                    "trustedIssuers": "",
+                    "agentBindings": [],
+                })),
+                seen_nonces_line,
+            ),
+            (
+                "two members that are not arrays, trustedIssuers written first",
+                edited(self.text, lambda d: d["verifierState"].update(seenNonces=0, trustedIssuers="")),
+                seen_nonces_line,
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+    def test_null_and_missing_read_as_the_empty_array(self) -> None:
+        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
+        no_binding = f"challenge.agentDid {self.cb['agentDid']} has no agentBinding in verifierState"
+        not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
+
+        def edit(name: str, null: bool, category: str) -> str:
+            def apply(d: dict) -> None:
+                if null:
+                    d["verifierState"][name] = None
+                else:
+                    del d["verifierState"][name]
+                if category:
+                    d["expected"] = {"verifyResult": "REJECT", "rejectCategory": category}
+
+            return edited(self.text, apply)
+
+        cases = [
+            ("seenNonces null", edit("seenNonces", True, ""), "", accepted),
+            ("no seenNonces", edit("seenNonces", False, ""), "", accepted),
+            ("agentBindings null", edit("agentBindings", True, "UNTRUSTED_KEY"), "UNTRUSTED_KEY", no_binding),
+            ("no agentBindings", edit("agentBindings", False, "UNTRUSTED_KEY"), "UNTRUSTED_KEY", no_binding),
+            ("trustedIssuers null", edit("trustedIssuers", True, "UNTRUSTED_ISSUER"), "UNTRUSTED_ISSUER", not_trusted),
+            ("no trustedIssuers", edit("trustedIssuers", False, "UNTRUSTED_ISSUER"), "UNTRUSTED_ISSUER", not_trusted),
+        ]
+        for name, text, category, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, category, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+
+# The line both verifiers print for each fixture under fixtures/load-errors/;
+# ../go/verify_test.go holds the same lines.
+LOAD_ERROR_LINES = {
+    "challenge-response-repeated-challenge.json": "parse error: challengeResponse.challenge: duplicate member name",
+    "challenge-response-repeated-response.json": "parse error: challengeResponse.response: duplicate member name",
+    "verifier-state-agent-bindings-not-an-array.json": "fixture error: verifierState.agentBindings: an object, not an array",
+    "verifier-state-seen-nonces-not-an-array.json": "fixture error: verifierState.seenNonces: a number, not an array",
+    "verifier-state-trusted-issuers-not-an-array.json": "fixture error: verifierState.trustedIssuers: a string, not an array",
+}
+
+
+class LoadErrorFixturesTest(unittest.TestCase):
+    """fixtures/load-errors/ holds the fixtures MANIFEST.sha256 pins that no
+    conforming verifier loads: a run over it prints each one's line in
+    LOAD_ERROR_LINES and exits 1."""
+
+    def test_each_fails_to_load_with_its_line(self) -> None:
+        names = sorted(p.name for p in LOAD_ERRORS.glob("*.json"))
+        self.assertEqual(names, sorted(LOAD_ERROR_LINES))
+        code, out, err = run_main(LOAD_ERRORS)
+        self.assertEqual(
+            out,
+            "".join(f"FAIL  {LOAD_ERRORS / name}\n       {LOAD_ERROR_LINES[name]}\n" for name in names)
+            + f"\nsummary: 0 pass, {len(names)} fail ({len(names)} fixtures)\n",
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

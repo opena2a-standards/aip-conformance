@@ -9,7 +9,7 @@ for changing the fixture set.
 |---|---|---|
 | AIP spec | v1.0.0-draft | [`opena2a-org/agent-identity-protocol/AIP-SPEC.md`](https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md) |
 | `did:opena2a` method | v0.1 (W3C registration filed, PR `w3c/did-extensions#717`) | [`opena2a-standards/did-method-opena2a`](https://github.com/opena2a-standards/did-method-opena2a/blob/main/did-method-opena2a.md) |
-| Ed25519 test vector source | RFC 8032 §7.1 Tests 1, 2, 3 | [datatracker.ietf.org/doc/html/rfc8032](https://datatracker.ietf.org/doc/html/rfc8032) |
+| Ed25519 test vector source | RFC 8032 §7.1 Tests 1, 2, 3 and TEST 1024 | [datatracker.ietf.org/doc/html/rfc8032](https://datatracker.ietf.org/doc/html/rfc8032) |
 | Go Ed25519 | `crypto/ed25519` (Go 1.22+ standard library) | [pkg.go.dev/crypto/ed25519](https://pkg.go.dev/crypto/ed25519) |
 | Python Ed25519 | `cryptography >= 42.0.0` | [pyca/cryptography](https://github.com/pyca/cryptography) |
 | Conformance fixture format | v1 (this repo) | [`fixtures/challenge-response-valid.json#$schema`](../fixtures/challenge-response-valid.json) |
