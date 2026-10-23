@@ -64,6 +64,13 @@ and a `trustedIssuers`, `agentBindings` or `seenNonces` member of
 `verifierState` that is present must be an array or null (null and a
 missing member read as the empty array).
 
+Both reference verifiers also refuse to load a fixture whose
+`verifierState.trustedIssuers` array holds an entry that is not a string,
+null included; no file here pins that rule. The line names the first such
+entry: for the valid fixture with `trustedIssuers` set to
+`["did:opena2a:authority:opena2a.org", 5]`, both print
+`fixture error: verifierState.trustedIssuers[1]: a number, not a string`.
+
 ## §6.1 trust-score composition fixtures
 
 A `trustScoreComposition` fixture carries the nine §6.1 factors in table

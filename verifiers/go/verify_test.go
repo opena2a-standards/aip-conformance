@@ -1281,6 +1281,92 @@ func TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError(t *testing.T) {
 	}
 }
 
+// TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError: each entry of a
+// verifierState.trustedIssuers array must be a string. An entry of another
+// JSON type, null included, fails the fixture when it loads, so before the
+// signature check and for every fixture type, with one line naming the first
+// such entry and its JSON type; a seenNonces that is not an array is named
+// before it. A string entry is compared as written. The cases are built from
+// the valid fixture, and one from a trustScoreComposition fixture.
+// ../python/test_verify.py builds the same cases and expects the same lines.
+func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	var valid Fixture
+	if err := json.Unmarshal(raw, &valid); err != nil {
+		t.Fatal(err)
+	}
+	cb := valid.ChallengeResponse.Challenge
+	issuer := strconv.Quote(cb.IssuerDID)
+	set := func(text, name, value string) string {
+		return strings.Replace(text, memberText(t, text, name), strconv.Quote(name)+": "+value, 1)
+	}
+	entryLine := func(index int, kind string) string {
+		return fmt.Sprintf("fixture error: verifierState.trustedIssuers[%d]: %s, not a string", index, kind)
+	}
+
+	entries := []struct{ value, kind string }{
+		{"0", "a number"}, {"5", "a number"}, {"false", "a boolean"}, {"true", "a boolean"},
+		{"null", "null"}, {"[]", "an array"}, {"[" + issuer + "]", "an array"}, {"{}", "an object"},
+	}
+	for _, e := range entries {
+		// The entry alone, at index 0, and after the trusted issuer, at index 1.
+		for index, issuers := range []string{"[" + e.value + "]", "[" + issuer + ", " + e.value + "]"} {
+			t.Run(fmt.Sprintf("entry %d %s", index, e.value), func(t *testing.T) {
+				path, code, out := runText(t, set(doc, "trustedIssuers", issuers))
+				if want := failBlock(path, entryLine(index, e.kind)); code != 1 || out != want {
+					t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+				}
+			})
+		}
+	}
+
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadErrors := []struct{ name, doc, line string }{
+		{"two entries that are not strings", set(doc, "trustedIssuers", "[5, null]"), entryLine(0, "a number")},
+		{"an entry 5 under a signature that does not verify",
+			strings.Replace(set(doc, "trustedIssuers", "["+issuer+", 5]"), `"issuedAt": "`+cb.IssuedAt+`"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 1),
+			entryLine(1, "a number")},
+		{"an entry 5 in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"trustedIssuers": [5]}`),
+			entryLine(0, "a number")},
+		{"an entry 5 written before a seenNonces 0",
+			set(set(doc, "seenNonces", "0"), "trustedIssuers", "[5]"),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+	}
+	for _, tc := range loadErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
+	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
+	stringEntries := []struct{ name, doc, category, line string }{
+		{"an empty string entry before the issuer", set(doc, "trustedIssuers", `["", `+issuer+`]`), "", accepted},
+		{"an empty string entry alone",
+			set(set(doc, "trustedIssuers", `[""]`), "expected", `{"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}`),
+			"UNTRUSTED_ISSUER", notTrusted},
+	}
+	for _, tc := range stringEntries {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
 // loadErrorLines is the line both verifiers print for each fixture under
 // fixtures/load-errors/; ../python/test_verify.py holds the same lines.
 var loadErrorLines = map[string]string{

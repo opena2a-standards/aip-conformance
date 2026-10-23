@@ -38,12 +38,17 @@
 // prints the summary line.
 //
 // A fixture of any fixtureType whose verifierState is an object holding an
-// agentBindings, seenNonces or trustedIssuers that is not an array or null
-// prints that FAIL block before any check runs, with the line the Python
-// verifier prints for it:
+// agentBindings, seenNonces or trustedIssuers that is not an array or null,
+// or a trustedIssuers array with an entry that is not a string, null
+// included, prints that FAIL block before any check runs, with the line the
+// Python verifier prints for it:
 //
 //	FAIL  <path>
 //	       fixture error: verifierState.seenNonces: a number, not an array
+//
+// The line for an entry names the first one that is not a string, as in
+//
+//	fixture error: verifierState.trustedIssuers[1]: a number, not a string
 //
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
@@ -203,7 +208,8 @@ var protocolMessageTypes = map[reflect.Type]bool{
 // alone. Outside the two bodies each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
 // reports for it. A verifierState agentBindings, seenNonces or trustedIssuers
-// that is not an array or null is a *memberError (verifierStateArrays). An
+// that is not an array or null is a *memberError (verifierStateArrays), and
+// so is a trustedIssuers entry that is not a string (stringArrays). An
 // agentBindings entry that writes no publicKeyHex, or a null one, is marked
 // for the checks (markPublicKeyHexProblems), and so is a verifierState that
 // writes no clockRfc3339, or a null one (markClockProblem).
@@ -240,11 +246,22 @@ func (e *memberError) Error() string { return e.member + ": " + e.problem }
 // _VERIFIER_STATE_ARRAYS holds the same names in the same order.
 var verifierStateArrays = []string{"agentBindings", "seenNonces", "trustedIssuers"}
 
+// stringArrays names the verifierStateArrays members whose entries must be
+// strings. encoding/json fails to decode an entry that is a number, a
+// boolean, an array or an object into the string it reads, and decodes a
+// null entry as the empty string. The Python verifier's _STRING_ARRAYS holds
+// the same names.
+var stringArrays = map[string]bool{"trustedIssuers": true}
+
 // checkVerifierStateArrays returns a *memberError naming the first
 // verifierStateArrays member of the verifierState object in raw that holds a
 // value that is not an array or null, such as 0, false, "" or {}, which
-// encoding/json fails to decode into a slice. It returns nil when there is
-// none, or when verifierState is not an object, which the decode reports.
+// encoding/json fails to decode into a slice, or the first entry of a
+// stringArrays member that is not a string, such as 5 or null, named as in
+// verifierState.trustedIssuers[1]. The members are checked in the order of
+// verifierStateArrays, the entries of each after its value. It returns nil
+// when there is none, or when verifierState is not an object, which the
+// decode reports.
 func checkVerifierStateArrays(raw []byte) error {
 	var doc struct {
 		VerifierState map[string]json.RawMessage `json:"verifierState"`
@@ -259,6 +276,15 @@ func checkVerifierStateArrays(raw []byte) error {
 		}
 		if kind := jsonType(value); kind != "an array" && kind != "null" {
 			return &memberError{"verifierState." + name, kind + ", not an array"}
+		}
+		if !stringArrays[name] {
+			continue
+		}
+		entries, _ := arrayElements(value)
+		for i, entry := range entries {
+			if kind := jsonType(entry); kind != "a string" {
+				return &memberError{fmt.Sprintf("verifierState.%s[%d]", name, i), kind + ", not a string"}
+			}
 		}
 	}
 	return nil

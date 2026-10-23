@@ -4,7 +4,8 @@ spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
-that is not an array or null is a fixture error, a timestamp with no UTC
+that is not an array or null is a fixture error, as is a trustedIssuers
+entry that is not a string, a timestamp with no UTC
 offset is not read in the machine's local time zone, a timestamp is read,
 signed and compared as the Go verifier reads, signs and compares it, and
 the walk that looks for a repeated member name stays within a memory bound
@@ -1143,6 +1144,99 @@ class VerifierStateArrayMemberTest(unittest.TestCase):
                 self.assertEqual(out, pass_block(path, category, line))
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
+
+
+class TrustedIssuersEntryTest(unittest.TestCase):
+    """Each entry of a verifierState.trustedIssuers array must be a string.
+    An entry of another JSON type, null included, fails the fixture when it
+    loads, so before the signature check and for every fixture type, with
+    one line naming the first such entry and its JSON type; a seenNonces
+    that is not an array is named before it. A string entry is compared as
+    written. The cases are built from the valid fixture, and one from a
+    trustScoreComposition fixture. ../go/verify_test.go builds the same
+    cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        self.cb = json.loads(self.text)["challengeResponse"]["challenge"]
+
+    def with_issuers(self, issuers: list) -> str:
+        return edited(self.text, lambda d: d["verifierState"].update(trustedIssuers=issuers))
+
+    @staticmethod
+    def entry_line(index: int, kind: str) -> str:
+        return f"fixture error: verifierState.trustedIssuers[{index}]: {kind}, not a string"
+
+    def test_entry_that_is_not_a_string_is_a_fixture_error(self) -> None:
+        issuer = self.cb["issuerDid"]
+        entries = [
+            (0, "a number"), (5, "a number"), (False, "a boolean"), (True, "a boolean"),
+            (None, "null"), ([], "an array"), ([issuer], "an array"), ({}, "an object"),
+        ]
+        for value, kind in entries:
+            # The entry alone, at index 0, and after the trusted issuer, at index 1.
+            for index, issuers in enumerate(([value], [issuer, value])):
+                with self.subTest(json.dumps(issuers)):
+                    path, code, out, err = run_text(self.with_issuers(issuers))
+                    self.assertEqual(out, fail_block(path, self.entry_line(index, kind)))
+                    self.assertEqual(err, "")
+                    self.assertEqual(code, 1)
+
+    def test_fixture_error_comes_before_the_checks_and_for_every_fixture_type(self) -> None:
+        def broken_signature(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [self.cb["issuerDid"], 5]
+            d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        cases = [
+            ("two entries that are not strings", self.with_issuers([5, None]), self.entry_line(0, "a number")),
+            (
+                "an entry 5 under a signature that does not verify",
+                edited(self.text, broken_signature),
+                self.entry_line(1, "a number"),
+            ),
+            (
+                "an entry 5 in a trustScoreComposition fixture",
+                append_member(COMPOSITION.read_text(encoding="utf-8"), '"verifierState": {"trustedIssuers": [5]}'),
+                self.entry_line(0, "a number"),
+            ),
+            (
+                "an entry 5 written before a seenNonces 0",
+                edited(self.text, lambda d: d["verifierState"].update(trustedIssuers=[5], seenNonces=0)),
+                "fixture error: verifierState.seenNonces: a number, not an array",
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+    def test_string_entry_is_compared_as_written(self) -> None:
+        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
+        not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
+
+        def empty_string_alone(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [""]
+            d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}
+
+        cases = [
+            ("an empty string entry before the issuer", self.with_issuers(["", self.cb["issuerDid"]]), "", accepted),
+            ("an empty string entry alone", edited(self.text, empty_string_alone), "UNTRUSTED_ISSUER", not_trusted),
+        ]
+        for name, text, category, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, category, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_check_called_directly_raises_for_the_entry(self) -> None:
+        doc = json.loads(self.text)
+        vs = dict(doc["verifierState"], trustedIssuers=[self.cb["issuerDid"], 5])
+        with self.assertRaises(verify.FixtureError) as raised:
+            verify.verify_challenge_response(doc["challengeResponse"], vs)
+        self.assertEqual(str(raised.exception), "verifierState.trustedIssuers[1]: a number, not a string")
 
 
 # The line both verifiers print for each fixture under fixtures/load-errors/;

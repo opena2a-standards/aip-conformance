@@ -72,7 +72,8 @@ a fixture's members under their exact names (`VerifierState` is not
 `verifierState`), and a fixture that writes one member name twice in the
 same JSON object fails to load, as does one whose `verifierState` holds a
 `trustedIssuers`, `agentBindings` or `seenNonces` member that is neither an
-array nor null; each counts as a fail (exit code 1).
+array nor null, or a `trustedIssuers` entry that is not a string; each
+counts as a fail (exit code 1).
 [`fixtures/load-errors/`](./fixtures/load-errors) holds pinned examples
 that a conforming verifier refuses to load
 ([lines](docs/checks.md#load-error-fixtures)).
