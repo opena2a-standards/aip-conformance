@@ -16,26 +16,28 @@ member name twice in the same JSON object fails to load on both verifiers,
 which counts as a fail (exit code 1).
 
 A file whose top-level value is not a JSON object fails to load. A
-challengeResponse fixture that carries its challengeResponse payload and no
-verifierState member, or whose verifierState holds a value that a check
-reads and cannot use (FixtureError lists them), prints a FAIL block naming
+challengeResponse fixture whose verifierState holds a value that a check
+reads and cannot use (FixtureError lists them) prints a FAIL block naming
 the member:
 
     FAIL  <path>
            fixture error: verifierState.agentBindings[0].agentDid: missing
 
-A fixture of any fixtureType whose verifierState is an object holding an
-agentBindings, seenNonces or trustedIssuers that is not an array or null,
-or a trustedIssuers array with an entry that is not a string, null
-included, prints that FAIL block before any check runs, with the line the
-Go verifier prints for it:
+A challengeResponse fixture whose verifierState is missing or is not an
+object, and a fixture of any fixtureType whose verifierState is an object
+holding an agentBindings, seenNonces or trustedIssuers that is not an array
+or null, an agentBindings entry that is not an object, or a seenNonces or
+trustedIssuers entry that is not a non-empty string, null included, prints
+that FAIL block before any check runs, with the line the Go verifier prints
+for it:
 
     FAIL  <path>
            fixture error: verifierState.seenNonces: a number, not an array
 
-The line for an entry names the first one that is not a string, as in
+The line for an entry names the first one the rule refuses, as in
 
            fixture error: verifierState.trustedIssuers[1]: a number, not a string
+           fixture error: verifierState.seenNonces[0]: an empty string
 
 Any other error raised while checking a fixture prints a FAIL block with
 the error's type and message. Each of these counts as a fail, and the run
@@ -123,14 +125,16 @@ class FixtureError(ValueError):
     the check reading it cannot use. str() is "<member>: <problem>", with the
     member named as _repeated_member names it, for example
     "verifierState.agentBindings[0].agentDid: missing". It is raised for a
-    challengeResponse fixture that carries a challengeResponse payload and no
-    verifierState member, and by the §5.1 checks for verifierState and for
-    the agentBindings, publicKeyHex, clockRfc3339, seenNonces and
-    trustedIssuers members they read from it and for each trustedIssuers
-    entry. The checks read verifierState only after the signature check
-    passes, except that an agentBindings, seenNonces or trustedIssuers that
-    is not an array or null, or a trustedIssuers entry that is not a string,
-    fails any fixture before its checks run (_check_verifier_state_arrays)."""
+    challengeResponse fixture whose verifierState is missing or is not an
+    object, and by the §5.1 checks for verifierState and for the
+    agentBindings, publicKeyHex, clockRfc3339, seenNonces and trustedIssuers
+    members they read from it and for the entries of the three arrays. The
+    checks read verifierState only after the signature check passes, except
+    that a challengeResponse fixture's verifierState that is missing or is
+    not an object, an agentBindings, seenNonces or trustedIssuers that is not
+    an array or null, an agentBindings entry that is not an object, and a
+    seenNonces or trustedIssuers entry that is not a non-empty string fail
+    the fixture before its checks run (_check_verifier_state)."""
 
     def __init__(self, member: str, problem: str) -> None:
         super().__init__(f"{member}: {problem}")
@@ -275,8 +279,9 @@ def _lookup_agent_binding(vs: Any, agent_did: Any) -> Optional[Tuple[str, dict]]
     agent_did, with the member name of that entry, or None when no entry is.
     A missing or null agentBindings holds no entry. FixtureError names the
     member when verifierState is not an object, when agentBindings is a
-    value that is not an array or null, or when an entry read before one
-    matches is not an object or has no agentDid."""
+    value that is not an array or null or holds an entry that is not an
+    object (_array_member), or when an entry read before one matches has no
+    agentDid."""
     if not isinstance(vs, dict):
         raise FixtureError("verifierState", f"{_json_type(vs)}, not an object")
     for i, b in enumerate(_array_member(vs, "agentBindings")):
@@ -293,30 +298,40 @@ def _array_member(vs: dict, name: str) -> list:
     of that name or holds null there, or FixtureError naming the member when
     it holds any other value, such as 0, false, an empty string or an empty
     object. The Go verifier's encoding/json decodes a missing or null member
-    into an empty slice and fails to decode the others. For a name in
-    _STRING_ARRAYS, FixtureError names the first entry of the array that is
-    not a string, null included, as in verifierState.trustedIssuers[1]."""
+    into an empty slice and fails to decode the others. FixtureError names
+    the first entry of the array that is not of the JSON type
+    _VERIFIER_STATE_ARRAYS gives the member, null included, as in
+    verifierState.trustedIssuers[1], or that is the empty string."""
     value = vs.get(name)
     if value is None:
         return []
     if not isinstance(value, list):
         raise FixtureError(f"verifierState.{name}", f"{_json_type(value)}, not an array")
-    if name in _STRING_ARRAYS:
-        for i, entry in enumerate(value):
-            if not isinstance(entry, str):
-                raise FixtureError(f"verifierState.{name}[{i}]", f"{_json_type(entry)}, not a string")
+    entry_type = _VERIFIER_STATE_ARRAYS[name]
+    for i, entry in enumerate(value):
+        if _json_type(entry) != entry_type:
+            raise FixtureError(f"verifierState.{name}[{i}]", f"{_json_type(entry)}, not {entry_type}")
+        if entry == "":
+            raise FixtureError(f"verifierState.{name}[{i}]", "an empty string")
     return value
 
 
-def _check_verifier_state_arrays(f: dict) -> None:
-    """FixtureError naming the first of verifierState.agentBindings,
+def _check_verifier_state(f: dict) -> None:
+    """FixtureError naming verifierState when f is a challengeResponse
+    fixture that has no verifierState member or one that is not an object,
+    such as null or []. Otherwise, when verifierState is an object,
+    FixtureError naming the first of verifierState.agentBindings,
     verifierState.seenNonces and verifierState.trustedIssuers, in that order,
     that holds a value that is not an array or null, or the first entry of
-    one of them in _STRING_ARRAYS that is not a string, each member's
-    entries checked after its value, when verifierState is an object. It is
-    checked before any other fixture check, for every fixtureType, as the Go
-    verifier's parseFixture checks it (verifierStateArrays)."""
+    one of them that _array_member refuses, each member's entries checked
+    after its value. It is checked before any other fixture check, for every
+    fixtureType, as the Go verifier's parseFixture checks it
+    (checkVerifierState)."""
     vs = f.get("verifierState")
+    if f.get("fixtureType") == "challengeResponse" and not isinstance(vs, dict):
+        if "verifierState" not in f:
+            raise FixtureError("verifierState", "missing")
+        raise FixtureError("verifierState", f"{_json_type(vs)}, not an object")
     if isinstance(vs, dict):
         for name in _VERIFIER_STATE_ARRAYS:
             _array_member(vs, name)
@@ -434,16 +449,11 @@ def _emit_rfc3339(t: _Instant) -> str:
 _PROTOCOL_MESSAGES = (("challengeResponse", "challenge"), ("challengeResponse", "response"))
 
 # The verifierState members that hold an array, in the order
-# _check_verifier_state_arrays checks them. The Go verifier's
-# verifierStateArrays holds the same names in the same order.
-_VERIFIER_STATE_ARRAYS = ("agentBindings", "seenNonces", "trustedIssuers")
-
-# The _VERIFIER_STATE_ARRAYS members whose entries must be strings. The Go
-# verifier's encoding/json fails to decode an entry that is a number, a
-# boolean, an array or an object into the string it reads, and decodes a
-# null entry as the empty string. The Go verifier's stringArrays holds the
-# same names.
-_STRING_ARRAYS = frozenset({"trustedIssuers"})
+# _check_verifier_state checks them, each with the JSON type of its entries,
+# as _json_type names it; a string entry must also not be empty. The Go
+# verifier's verifierStateArrays holds the same names in the same order, with
+# the same entry types.
+_VERIFIER_STATE_ARRAYS = {"agentBindings": "an object", "seenNonces": "a string", "trustedIssuers": "a string"}
 
 # An unpaired UTF-16 surrogate, which json.loads keeps when a JSON string
 # escapes one with no partner beside it ("\ud800"). The Go verifier's
@@ -674,7 +684,7 @@ def run_fixture(path: Path) -> bool:
 
 def _check_fixture(path: Path, f: dict) -> bool:
     """run_fixture's checks of the loaded fixture f."""
-    _check_verifier_state_arrays(f)
+    _check_verifier_state(f)
     if f.get("fixtureType") == "trustScoreComposition":
         return run_composition(path, f)
     if f.get("fixtureType") != "challengeResponse":

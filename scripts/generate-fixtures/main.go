@@ -15,6 +15,7 @@
 //   - challenge-response-echoed-agent-differs  AIP §5.1 echoed fields equal the challenge body's (REJECT SIGNATURE_INVALID)
 //   - challenge-response-other-agent-key       AIP §5.1 key bound to the challenge's agentDid (REJECT UNTRUSTED_KEY)
 //   - challenge-response-untrusted-issuer      AIP §5.1 trusted-issuer check (REJECT UNTRUSTED_ISSUER)
+//   - challenge-response-no-trusted-issuers    AIP §5.1 trusted-issuer check, no trustedIssuers member (REJECT UNTRUSTED_ISSUER)
 //   - load-errors/*                            fixtures both reference verifiers refuse to load
 //
 // Canonical signing form (AIP §5.1, this suite's pinning):
@@ -88,8 +89,10 @@ type AgentBinding struct {
 }
 
 type VerifierState struct {
-	ClockRFC3339   string         `json:"clockRfc3339"`
-	TrustedIssuers []string       `json:"trustedIssuers"`
+	ClockRFC3339 string `json:"clockRfc3339"`
+	// TrustedIssuers is left out when it holds no issuer: fixture 12 writes
+	// no trustedIssuers member, and every other fixture names an issuer.
+	TrustedIssuers []string       `json:"trustedIssuers,omitempty"`
 	AgentBindings  []AgentBinding `json:"agentBindings"`
 	SeenNonces     []string       `json:"seenNonces"`
 }
@@ -588,7 +591,7 @@ func main() {
 	agentUnbound := mustLoadKeyVector("vectors/agent-unbound-key.json")
 	agentSecond := mustLoadKeyVector("vectors/agent-second-key.json")
 
-	// The challenge-response-valid transcript, which fixtures 9-11 and the
+	// The challenge-response-valid transcript, which fixtures 9-12 and the
 	// load-error fixtures start from.
 	validBody := ChallengeBody{
 		Challenge: validChallenge,
@@ -988,6 +991,32 @@ func main() {
 				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
 				Name:        "aip-v0.3/challenge-response-untrusted-issuer",
 				Description: "The challenge-response-valid transcript under a verifierState whose trustedIssuers does not hold the challenge's issuerDid. The signature verifies under the agent's bound key, the challenge has not expired and the nonce is unseen; the trusted-issuer check runs after those four. Verifier MUST REJECT with UNTRUSTED_ISSUER.",
+				FixtureType: "challengeResponse",
+				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: issuerDid is a trusted issuer"),
+				KeypairRefs: []KeypairRef{
+					keypairRefFor(primary, "vectors/issuer-primary.json"),
+					keypairRefFor(agentBound, "vectors/agent-bound-key.json"),
+				},
+				VerifierState: vsPtr(vs),
+				Expected: ExpectedOutcome{
+					VerifyResult:   "REJECT",
+					RejectCategory: "UNTRUSTED_ISSUER",
+					ReasonContains: "issuerDid",
+				},
+				ChallengeResponse: &ChallengeResponse{Challenge: validBody, Response: validResponse},
+			}
+		}},
+
+		// ----------------------------------------------------------------
+		// Fixture 12: challenge-response-no-trusted-issuers (REJECT UNTRUSTED_ISSUER)
+		// ----------------------------------------------------------------
+		{"fixtures/challenge-response-no-trusted-issuers.json", func() Fixture {
+			vs := baseVerifierState(agentBound)
+			vs.TrustedIssuers = nil
+			return Fixture{
+				Schema:      "https://aip.opena2a.org/schemas/fixture-v1.json",
+				Name:        "aip-v0.3/challenge-response-no-trusted-issuers",
+				Description: "The challenge-response-valid transcript under a verifierState that writes no trustedIssuers member. An absent trustedIssuers, like a null or empty one, is the empty trusted-issuer set: the verifier trusts no issuer. The signature verifies under the agent's bound key, the challenge has not expired and the nonce is unseen; the trusted-issuer check runs after those four. Verifier MUST REJECT with UNTRUSTED_ISSUER.",
 				FixtureType: "challengeResponse",
 				Spec:        specRefs("§5.1 Challenge-Response Protocol — step 5: issuerDid is a trusted issuer"),
 				KeypairRefs: []KeypairRef{

@@ -37,18 +37,21 @@
 // fixture counts as a fail, and the run goes on to the next fixture and
 // prints the summary line.
 //
-// A fixture of any fixtureType whose verifierState is an object holding an
-// agentBindings, seenNonces or trustedIssuers that is not an array or null,
-// or a trustedIssuers array with an entry that is not a string, null
-// included, prints that FAIL block before any check runs, with the line the
-// Python verifier prints for it:
+// A challengeResponse fixture whose verifierState is missing or is not an
+// object, and a fixture of any fixtureType whose verifierState is an object
+// holding an agentBindings, seenNonces or trustedIssuers that is not an array
+// or null, an agentBindings entry that is not an object, or a seenNonces or
+// trustedIssuers entry that is not a non-empty string, null included, prints
+// that FAIL block before any check runs, with the line the Python verifier
+// prints for it:
 //
 //	FAIL  <path>
 //	       fixture error: verifierState.seenNonces: a number, not an array
 //
-// The line for an entry names the first one that is not a string, as in
+// The line for an entry names the first one the rule refuses, as in
 //
 //	fixture error: verifierState.trustedIssuers[1]: a number, not a string
+//	fixture error: verifierState.seenNonces[0]: an empty string
 //
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
@@ -207,12 +210,14 @@ var protocolMessageTypes = map[reflect.Type]bool{
 // the later copy omits, where the Python verifier reads the later copy
 // alone. Outside the two bodies each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
-// reports for it. A verifierState agentBindings, seenNonces or trustedIssuers
-// that is not an array or null is a *memberError (verifierStateArrays), and
-// so is a trustedIssuers entry that is not a string (stringArrays). An
-// agentBindings entry that writes no publicKeyHex, or a null one, is marked
-// for the checks (markPublicKeyHexProblems), and so is a verifierState that
-// writes no clockRfc3339, or a null one (markClockProblem).
+// reports for it. A challengeResponse fixture whose verifierState is missing
+// or is not an object is a *memberError, and so is a verifierState
+// agentBindings, seenNonces or trustedIssuers that is not an array or null,
+// or an entry of one that is not of the type verifierStateArrays gives it
+// (checkVerifierState). An agentBindings entry that writes no publicKeyHex,
+// or a null one, is marked for the checks (markPublicKeyHexProblems), and so
+// is a verifierState that writes no clockRfc3339, or a null one
+// (markClockProblem).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -220,7 +225,7 @@ func parseFixture(b []byte) (Fixture, error) {
 			return f, fmt.Errorf("%s: duplicate member name", member)
 		}
 		b = exactMembers(b, reflect.TypeOf(f))
-		if err := checkVerifierStateArrays(b); err != nil {
+		if err := checkVerifierState(b); err != nil {
 			return f, err
 		}
 	}
@@ -242,48 +247,64 @@ type memberError struct {
 func (e *memberError) Error() string { return e.member + ": " + e.problem }
 
 // verifierStateArrays names the verifierState members that hold an array, in
-// the order checkVerifierStateArrays checks them. The Python verifier's
-// _VERIFIER_STATE_ARRAYS holds the same names in the same order.
-var verifierStateArrays = []string{"agentBindings", "seenNonces", "trustedIssuers"}
+// the order checkVerifierState checks them, each with the JSON type of its
+// entries; a string entry must also not be empty. The Python verifier's
+// _VERIFIER_STATE_ARRAYS holds the same names in the same order, with the
+// same entry types.
+var verifierStateArrays = []struct{ name, entry string }{
+	{"agentBindings", "an object"},
+	{"seenNonces", "a string"},
+	{"trustedIssuers", "a string"},
+}
 
-// stringArrays names the verifierStateArrays members whose entries must be
-// strings. encoding/json fails to decode an entry that is a number, a
-// boolean, an array or an object into the string it reads, and decodes a
-// null entry as the empty string. The Python verifier's _STRING_ARRAYS holds
-// the same names.
-var stringArrays = map[string]bool{"trustedIssuers": true}
-
-// checkVerifierStateArrays returns a *memberError naming the first
-// verifierStateArrays member of the verifierState object in raw that holds a
-// value that is not an array or null, such as 0, false, "" or {}, which
-// encoding/json fails to decode into a slice, or the first entry of a
-// stringArrays member that is not a string, such as 5 or null, named as in
-// verifierState.trustedIssuers[1]. The members are checked in the order of
-// verifierStateArrays, the entries of each after its value. It returns nil
-// when there is none, or when verifierState is not an object, which the
+// checkVerifierState returns a *memberError naming the verifierState of a
+// challengeResponse fixture in raw when raw writes none or writes one that is
+// not an object, such as null or []. Otherwise it names the first
+// verifierStateArrays member of the verifierState object that holds a value
+// that is not an array or null, such as 0, false, "" or {}, or the first
+// entry of one that is not of the member's entry type, null included, or is
+// the empty string, named as in verifierState.seenNonces[1]. The members are
+// checked in the order of verifierStateArrays, the entries of each after its
+// value. Each value and entry is read from raw: encoding/json decodes a null
+// entry into the empty string or the zero AgentBinding, and an empty string
+// as written, with no error. It returns nil when there is none, or when raw,
+// or the verifierState of another fixtureType, is not an object, which the
 // decode reports.
-func checkVerifierStateArrays(raw []byte) error {
-	var doc struct {
-		VerifierState map[string]json.RawMessage `json:"verifierState"`
-	}
+func checkVerifierState(raw []byte) error {
+	var doc map[string]json.RawMessage
 	if json.Unmarshal(raw, &doc) != nil {
 		return nil
 	}
-	for _, name := range verifierStateArrays {
-		value, ok := doc.VerifierState[name]
+	state, written := doc["verifierState"]
+	var fixtureType string
+	if json.Unmarshal(doc["fixtureType"], &fixtureType) == nil && fixtureType == "challengeResponse" {
+		if !written {
+			return &memberError{"verifierState", "missing"}
+		}
+		if kind := jsonType(state); kind != "an object" {
+			return &memberError{"verifierState", kind + ", not an object"}
+		}
+	}
+	var vs map[string]json.RawMessage
+	if json.Unmarshal(state, &vs) != nil {
+		return nil
+	}
+	for _, array := range verifierStateArrays {
+		value, ok := vs[array.name]
 		if !ok {
 			continue
 		}
 		if kind := jsonType(value); kind != "an array" && kind != "null" {
-			return &memberError{"verifierState." + name, kind + ", not an array"}
-		}
-		if !stringArrays[name] {
-			continue
+			return &memberError{"verifierState." + array.name, kind + ", not an array"}
 		}
 		entries, _ := arrayElements(value)
 		for i, entry := range entries {
-			if kind := jsonType(entry); kind != "a string" {
-				return &memberError{fmt.Sprintf("verifierState.%s[%d]", name, i), kind + ", not a string"}
+			member := fmt.Sprintf("verifierState.%s[%d]", array.name, i)
+			if kind := jsonType(entry); kind != array.entry {
+				return &memberError{member, kind + ", not " + array.entry}
+			}
+			if string(bytes.TrimSpace(entry)) == `""` {
+				return &memberError{member, "an empty string"}
 			}
 		}
 	}

@@ -4,8 +4,10 @@ spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
-that is not an array or null is a fixture error, as is a trustedIssuers
-entry that is not a string, a timestamp with no UTC
+that is not an array or null is a fixture error, as is an agentBindings
+entry that is not an object, a seenNonces or trustedIssuers entry that is
+not a non-empty string and a challengeResponse fixture with no verifierState
+object, a timestamp with no UTC
 offset is not read in the machine's local time zone, a timestamp is read,
 signed and compared as the Go verifier reads, signs and compares it, and
 the walk that looks for a repeated member name stays within a memory bound
@@ -411,12 +413,14 @@ class UnreadableFixtureTest(unittest.TestCase):
         self.assert_fails_then_valid_passes(edited(self.text, edit), "error: KeyError: 'agentDid'")
 
     def test_signature_reject_does_not_read_verifier_state(self) -> None:
-        """The signature check runs before any check reads verifierState, so
-        a null verifierState under a signature that does not verify keeps
-        the REJECT [SIGNATURE_INVALID] verdict."""
+        """The signature check runs before any check reads a verifierState
+        member, so a null clockRfc3339 under a signature that does not
+        verify keeps the REJECT [SIGNATURE_INVALID] verdict. A verifierState
+        that is not an object fails the fixture before any check
+        (VerifierStateObjectTest)."""
 
         def edit(d: dict) -> None:
-            d["verifierState"] = None
+            d["verifierState"]["clockRfc3339"] = None
             d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
             d["challengeResponse"]["response"]["issuedAt"] = "2026-05-27T23:59:00Z"
             d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"}
@@ -1244,11 +1248,12 @@ class VerifierStateArrayMemberTest(unittest.TestCase):
 
 
 class TrustedIssuersEntryTest(unittest.TestCase):
-    """Each entry of a verifierState.trustedIssuers array must be a string.
-    An entry of another JSON type, null included, fails the fixture when it
-    loads, so before the signature check and for every fixture type, with
-    one line naming the first such entry and its JSON type; a seenNonces
-    that is not an array is named before it. A string entry is compared as
+    """Each entry of a verifierState.trustedIssuers array must be a
+    non-empty string. An entry of another JSON type, null included, or the
+    empty string fails the fixture when it loads, so before the signature
+    check and for every fixture type, with one line naming the first such
+    entry and its JSON type, or that it is empty; a seenNonces that is not
+    an array is named before it. A non-empty string entry is compared as
     written. The cases are built from the valid fixture, and one from a
     trustScoreComposition fixture. ../go/verify_test.go builds the same
     cases and expects the same lines."""
@@ -1263,6 +1268,10 @@ class TrustedIssuersEntryTest(unittest.TestCase):
     @staticmethod
     def entry_line(index: int, kind: str) -> str:
         return f"fixture error: verifierState.trustedIssuers[{index}]: {kind}, not a string"
+
+    @staticmethod
+    def empty_line(index: int) -> str:
+        return f"fixture error: verifierState.trustedIssuers[{index}]: an empty string"
 
     def test_entry_that_is_not_a_string_is_a_fixture_error(self) -> None:
         issuer = self.cb["issuerDid"]
@@ -1280,9 +1289,20 @@ class TrustedIssuersEntryTest(unittest.TestCase):
                     self.assertEqual(code, 1)
 
     def test_fixture_error_comes_before_the_checks_and_for_every_fixture_type(self) -> None:
+        issuer = self.cb["issuerDid"]
+
         def broken_signature(d: dict) -> None:
             d["verifierState"]["trustedIssuers"] = [self.cb["issuerDid"], 5]
             d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        def empty_string_alone(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [""]
+            d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}
+
+        def empty_string_under_a_bad_signature(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [issuer, ""]
+            for body in d["challengeResponse"].values():
+                body["issuedAt"] = "2026-05-27T23:59:00Z"
 
         cases = [
             ("two entries that are not strings", self.with_issuers([5, None]), self.entry_line(0, "a number")),
@@ -1301,6 +1321,20 @@ class TrustedIssuersEntryTest(unittest.TestCase):
                 edited(self.text, lambda d: d["verifierState"].update(trustedIssuers=[5], seenNonces=0)),
                 "fixture error: verifierState.seenNonces: a number, not an array",
             ),
+            ("an empty string entry before the issuer", self.with_issuers(["", issuer]), self.empty_line(0)),
+            ("an empty string entry alone", edited(self.text, empty_string_alone), self.empty_line(0)),
+            ("an empty string entry after the issuer", self.with_issuers([issuer, ""]), self.empty_line(1)),
+            ("an empty string entry after a null entry", self.with_issuers([None, ""]), self.entry_line(0, "null")),
+            (
+                "an empty string entry under a signature that does not verify",
+                edited(self.text, empty_string_under_a_bad_signature),
+                self.empty_line(1),
+            ),
+            (
+                "an empty string entry in a trustScoreComposition fixture",
+                append_member(COMPOSITION.read_text(encoding="utf-8"), '"verifierState": {"trustedIssuers": [""]}'),
+                self.empty_line(0),
+            ),
         ]
         for name, text, line in cases:
             with self.subTest(name):
@@ -1313,13 +1347,19 @@ class TrustedIssuersEntryTest(unittest.TestCase):
         accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
         not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
 
-        def empty_string_alone(d: dict) -> None:
-            d["verifierState"]["trustedIssuers"] = [""]
+        def issuer_with_a_space_alone(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [self.cb["issuerDid"] + " "]
             d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}
 
         cases = [
-            ("an empty string entry before the issuer", self.with_issuers(["", self.cb["issuerDid"]]), "", accepted),
-            ("an empty string entry alone", edited(self.text, empty_string_alone), "UNTRUSTED_ISSUER", not_trusted),
+            (
+                "another issuer's DID before the issuer",
+                self.with_issuers(["did:opena2a:authority:example.org", self.cb["issuerDid"]]),
+                "",
+                accepted,
+            ),
+            ("a space before the issuer", self.with_issuers([" ", self.cb["issuerDid"]]), "", accepted),
+            ("the issuer with a space after it, alone", edited(self.text, issuer_with_a_space_alone), "UNTRUSTED_ISSUER", not_trusted),
         ]
         for name, text, category, line in cases:
             with self.subTest(name):
@@ -1334,6 +1374,252 @@ class TrustedIssuersEntryTest(unittest.TestCase):
         with self.assertRaises(verify.FixtureError) as raised:
             verify.verify_challenge_response(doc["challengeResponse"], vs)
         self.assertEqual(str(raised.exception), "verifierState.trustedIssuers[1]: a number, not a string")
+
+
+class VerifierStateEntryTest(unittest.TestCase):
+    """Each entry of a verifierState.agentBindings array must be an object,
+    and each entry of a verifierState.seenNonces array a non-empty string.
+    Any other entry, null included, fails the fixture when it loads, so
+    before the signature check and for every fixture type, with one line
+    naming the first such entry and its JSON type, or that it is empty. The
+    members are checked in the order agentBindings, seenNonces,
+    trustedIssuers, whichever is written first, the entries of each after
+    its value. The cases are built from the valid fixture, and two from a
+    trustScoreComposition fixture. ../go/verify_test.go builds the same
+    cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        doc = json.loads(self.text)
+        self.cb = doc["challengeResponse"]["challenge"]
+        self.bound = doc["verifierState"]["agentBindings"][0]
+        # A nonce the verifier has seen that is not the challenge's.
+        self.seen = probe_bytes(9, 16)
+
+    def with_state(self, **members: object) -> str:
+        return edited(self.text, lambda d: d["verifierState"].update(members))
+
+    @staticmethod
+    def line(name: str, index: int, problem: str) -> str:
+        return f"fixture error: verifierState.{name}[{index}]: {problem}"
+
+    def assert_fixture_error(self, text: str, line: str) -> None:
+        path, code, out, err = run_text(text)
+        self.assertEqual(out, fail_block(path, line))
+        self.assertEqual(err, "")
+        self.assertEqual(code, 1)
+
+    def test_entry_of_another_type_is_a_fixture_error(self) -> None:
+        bound = self.bound
+        agent_bindings = [
+            ("null", None, "null, not an object"), ("0", 0, "a number, not an object"),
+            ("false", False, "a boolean, not an object"), ("empty string", "", "a string, not an object"),
+            ("agentDid string", self.cb["agentDid"], "a string, not an object"),
+            ("empty array", [], "an array, not an object"),
+            ("bound entry in an array", [bound], "an array, not an object"),
+        ]
+        seen_nonces = [
+            ("null", None, "null, not a string"), ("0", 0, "a number, not a string"), ("1", 1, "a number, not a string"),
+            ("true", True, "a boolean, not a string"), ("empty array", [], "an array, not a string"),
+            ("challenge nonce in an array", [self.cb["nonce"]], "an array, not a string"),
+            ("empty object", {}, "an object, not a string"), ("empty string", "", "an empty string"),
+        ]
+        cases = []
+        for label, value, problem in agent_bindings:
+            cases += [
+                (f"agentBindings entry {label} alone", self.with_state(agentBindings=[value]),
+                 self.line("agentBindings", 0, problem)),
+                (f"agentBindings entry {label} before the bound entry", self.with_state(agentBindings=[value, bound]),
+                 self.line("agentBindings", 0, problem)),
+                (f"agentBindings entry {label} after the bound entry", self.with_state(agentBindings=[bound, value]),
+                 self.line("agentBindings", 1, problem)),
+            ]
+        for label, value, problem in seen_nonces:
+            cases += [
+                (f"seenNonces entry {label} alone", self.with_state(seenNonces=[value]), self.line("seenNonces", 0, problem)),
+                (f"seenNonces entry {label} after a seen nonce", self.with_state(seenNonces=[self.seen, value]),
+                 self.line("seenNonces", 1, problem)),
+            ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                self.assert_fixture_error(text, line)
+
+    def test_fixture_error_comes_before_the_checks_and_for_every_fixture_type(self) -> None:
+        def bad_signature(**members: object) -> str:
+            # A later issuedAt in the challenge body and in the response's
+            # echo of it keeps the echo and is a signature that does not verify.
+            def edit(d: dict) -> None:
+                d["verifierState"].update(members)
+                for body in d["challengeResponse"].values():
+                    body["issuedAt"] = "2026-05-27T23:59:00Z"
+
+            return edited(self.text, edit)
+
+        composition = COMPOSITION.read_text(encoding="utf-8")
+        cases = [
+            ('seenNonces [null, ""]', self.with_state(seenNonces=[None, ""]), self.line("seenNonces", 0, "null, not a string")),
+            (
+                "an agentBindings entry null under a signature that does not verify",
+                bad_signature(agentBindings=[None, self.bound]),
+                self.line("agentBindings", 0, "null, not an object"),
+            ),
+            (
+                "a seenNonces entry empty under a signature that does not verify",
+                bad_signature(seenNonces=[""]),
+                self.line("seenNonces", 0, "an empty string"),
+            ),
+            (
+                "an agentBindings entry null in a trustScoreComposition fixture",
+                append_member(composition, '"verifierState": {"agentBindings": [null]}'),
+                self.line("agentBindings", 0, "null, not an object"),
+            ),
+            (
+                "a seenNonces entry empty in a trustScoreComposition fixture",
+                append_member(composition, '"verifierState": {"seenNonces": [""]}'),
+                self.line("seenNonces", 0, "an empty string"),
+            ),
+            (
+                "a trustedIssuers entry 5 written before a seenNonces entry 5",
+                self.with_state(trustedIssuers=[5], seenNonces=[5]),
+                self.line("seenNonces", 0, "a number, not a string"),
+            ),
+            (
+                "an agentBindings entry null and a seenNonces entry null",
+                self.with_state(agentBindings=[None], seenNonces=[None]),
+                self.line("agentBindings", 0, "null, not an object"),
+            ),
+            (
+                "an agentBindings entry null and a seenNonces 0",
+                self.with_state(agentBindings=[None], seenNonces=0),
+                self.line("agentBindings", 0, "null, not an object"),
+            ),
+            (
+                "an agentBindings 0 and a seenNonces entry null",
+                self.with_state(agentBindings=0, seenNonces=[None]),
+                "fixture error: verifierState.agentBindings: a number, not an array",
+            ),
+            (
+                "a seenNonces entry empty and a trustedIssuers 0",
+                self.with_state(seenNonces=[""], trustedIssuers=0),
+                self.line("seenNonces", 0, "an empty string"),
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                self.assert_fixture_error(text, line)
+
+    def test_entry_of_its_type_is_read(self) -> None:
+        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
+        unbound = dict(self.bound, agentDid="did:opena2a:agent:not_bound")
+        cases = [
+            ("seenNonces holding another nonce", self.with_state(seenNonces=[self.seen])),
+            ("seenNonces holding a space", self.with_state(seenNonces=[" "])),
+            (
+                "agentBindings with an entry for another agentDid before the bound entry",
+                self.with_state(agentBindings=[unbound, self.bound]),
+            ),
+        ]
+        for name, text in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, "", accepted))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_checks_called_directly_raise_for_the_entry(self) -> None:
+        doc = json.loads(self.text)
+        cases = (
+            ("agentBindings", [None, self.bound], "verifierState.agentBindings[0]: null, not an object"),
+            ("seenNonces", [""], "verifierState.seenNonces[0]: an empty string"),
+            ("trustedIssuers", [self.cb["issuerDid"], ""], "verifierState.trustedIssuers[1]: an empty string"),
+        )
+        for name, value, line in cases:
+            with self.subTest(name):
+                vs = dict(doc["verifierState"], **{name: value})
+                with self.assertRaises(verify.FixtureError) as raised:
+                    verify.verify_challenge_response(doc["challengeResponse"], vs)
+                self.assertEqual(str(raised.exception), line)
+
+
+class VerifierStateObjectTest(unittest.TestCase):
+    """A challengeResponse fixture must carry a verifierState object. One
+    that writes no verifierState member, or one that is not an object, null
+    included, fails the fixture when it loads, so before the signature check
+    and before its challengeResponse member is read, with one line naming
+    verifierState. A trustScoreComposition fixture needs no verifierState,
+    and a null one is read as none. The cases are built from the valid
+    fixture and a trustScoreComposition fixture. ../go/verify_test.go builds
+    the same cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def test_missing_or_not_an_object_is_a_fixture_error(self) -> None:
+        state = member_text(self.text, "verifierState")
+        valid_state = json.loads(self.text)["verifierState"]
+
+        def with_state(value: object) -> str:
+            return edited(self.text, lambda d: d.update(verifierState=value))
+
+        def null_under_a_bad_signature(d: dict) -> None:
+            # A later issuedAt in the challenge body and in the response's echo
+            # of it keeps the echo and is a signature that does not verify.
+            d["verifierState"] = None
+            for body in d["challengeResponse"].values():
+                body["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        def neither(d: dict) -> None:
+            del d["verifierState"]
+            del d["challengeResponse"]
+
+        cases = [
+            ("no verifierState", edited(self.text, lambda d: d.pop("verifierState")), "verifierState: missing"),
+            (
+                "VerifierState in place of verifierState",
+                self.text.replace(state, '"VerifierState"' + state.removeprefix('"verifierState"')),
+                "verifierState: missing",
+            ),
+            ("verifierState null", with_state(None), "verifierState: null, not an object"),
+            ("verifierState 0", with_state(0), "verifierState: a number, not an object"),
+            ("verifierState false", with_state(False), "verifierState: a boolean, not an object"),
+            ('verifierState ""', with_state(""), "verifierState: a string, not an object"),
+            ("verifierState []", with_state([]), "verifierState: an array, not an object"),
+            (
+                "verifierState an array holding the valid verifierState",
+                with_state([valid_state]),
+                "verifierState: an array, not an object",
+            ),
+            (
+                "verifierState null under a signature that does not verify",
+                edited(self.text, null_under_a_bad_signature),
+                "verifierState: null, not an object",
+            ),
+            ("no verifierState and no challengeResponse", edited(self.text, neither), "verifierState: missing"),
+        ]
+        for name, text, member in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, "fixture error: " + member))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+    def test_trust_score_composition_fixture_needs_none(self) -> None:
+        composition = COMPOSITION.read_text(encoding="utf-8")
+        self.assertNotIn('"verifierState"', composition)
+        _, shipped_code, shipped, _ = run_text(composition)
+        self.assertTrue(shipped.startswith("PASS  "), shipped)
+        self.assertEqual(shipped_code, 0)
+        block = shipped.split("\n", 1)[1]
+        cases = (
+            ("a trustScoreComposition fixture with no verifierState", composition),
+            ("a trustScoreComposition fixture with verifierState null", append_member(composition, '"verifierState": null')),
+        )
+        for name, text in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, f"PASS  {path}\n" + block)
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
 
 
 # The line both verifiers print for each fixture under fixtures/load-errors/;

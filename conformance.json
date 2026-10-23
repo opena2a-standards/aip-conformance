@@ -74,6 +74,21 @@
       "description": "The challenge-response-replay transcript with one edit: the response echoes a nonce the verifier has not seen, while the challenge body, which the signature covers, carries the nonce listed in verifierState.seenNonces. The signature verifies under the agent's bound key and the challenge has not expired. Each of the five fields the response echoes must equal the challenge body's, and the nonce check reads the challenge body. Verifier MUST REJECT with SIGNATURE_INVALID."
     },
     {
+      "fixture": "fixtures/challenge-response-no-trusted-issuers.json",
+      "name": "aip-v0.3/challenge-response-no-trusted-issuers",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: issuerDid is a trusted issuer"
+        }
+      ],
+      "expected": "REJECT[UNTRUSTED_ISSUER]",
+      "description": "The challenge-response-valid transcript under a verifierState that writes no trustedIssuers member. An absent trustedIssuers, like a null or empty one, is the empty trusted-issuer set: the verifier trusts no issuer. The signature verifies under the agent's bound key, the challenge has not expired and the nonce is unseen; the trusted-issuer check runs after those four. Verifier MUST REJECT with UNTRUSTED_ISSUER."
+    },
+    {
       "fixture": "fixtures/challenge-response-other-agent-key.json",
       "name": "aip-v0.3/challenge-response-other-agent-key",
       "fixtureType": "challengeResponse",
