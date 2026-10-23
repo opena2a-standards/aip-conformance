@@ -134,7 +134,9 @@ The generator:
 1. Loads each Ed25519 keypair vector. Re-derives the public key from the
    seed and panics on drift against the pinned `publicKeyHex`.
 2. Constructs the challenge body, computes the pipe-delimited canonical
-   5-field payload, Ed25519-signs it with the appropriate key.
+   5-field payload, Ed25519-signs it with the appropriate key. `issuedAt`
+   and `expiresAt` enter the payload as both reference verifiers read them,
+   and the generator panics on a value they do not read.
 3. Builds the response body with the back-refs to the challenge fields
    plus the signature, base64-no-padding public key, and signing metadata.
 4. Marshals each fixture to byte-stable JSON (`encoding/json` with 2-space

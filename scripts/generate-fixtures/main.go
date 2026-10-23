@@ -45,7 +45,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -246,10 +248,83 @@ func canonicalChallengeResponsePayload(cb ChallengeBody) []byte {
 	))
 }
 
+// normalizeRFC3339 is s as both reference verifiers read it, in UTC and
+// written YYYY-MM-DDThh:mm:ssZ without its fraction of a second. It panics
+// on a value parseRFC3339 does not read, which the verifiers put in the
+// signed payload as written instead of reading it as a time. time.RFC3339
+// writes year -1, which an offset can make of year 0, as -0001, and year
+// 10000 as 10000.
 func normalizeRFC3339(s string) string {
-	t, err := time.Parse(time.RFC3339, s)
-	must(err)
+	t, err := parseRFC3339(s)
+	if err != nil {
+		panic(fmt.Sprintf("challenge issuedAt and expiresAt must be date-times the reference verifiers read: %v", err))
+	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// rfc3339DateTime matches the RFC 3339 date-time form both reference
+// verifiers read; verifiers/go/verify.go rfc3339DateTime and
+// verifiers/python/verify.py _RFC3339_DATE_TIME hold the same pattern. A
+// four-digit year and two-digit month, day, hour, minute and second, an
+// optional fraction of a second after a period, and Z or a UTC offset of
+// the form +hh:mm or -hh:mm, with T and Z in upper case. time.Parse with
+// the time.RFC3339 layout also reads forms outside RFC 3339, such as a
+// one-digit hour, a comma before the fraction and an offset of +24:00
+// (go.dev/issue/54580).
+var rfc3339DateTime = regexp.MustCompile(`^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})` +
+	`(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$`)
+
+// noUTCOffset matches a date alone, or a date and time with no UTC offset
+// (verifiers/go/verify.go noUTCOffset).
+var noUTCOffset = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)?$`)
+
+// parseRFC3339 is verifiers/go/verify.go parseRFC3339, with the same
+// messages. It reads s as a time, or returns an error when s is not an RFC
+// 3339 date-time in the form rfc3339DateTime matches. The month, day (by
+// the month and year), hour, minute, second and offset must be in range,
+// which leaves out a second of 60, an hour of 24 and an offset hour of 24.
+// The fraction is cut to nanoseconds.
+func parseRFC3339(s string) (time.Time, error) {
+	m := rfc3339DateTime.FindStringSubmatch(s)
+	if m == nil {
+		if noUTCOffset.MatchString(s) {
+			return time.Time{}, fmt.Errorf("%q has no UTC offset", s)
+		}
+		return time.Time{}, fmt.Errorf("%q is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm", s)
+	}
+	// Each group read here is digits, or empty (0) for the offset of Z.
+	num := func(group string) int {
+		v, _ := strconv.Atoi(group)
+		return v
+	}
+	year, month, day := num(m[1]), num(m[2]), num(m[3])
+	hour, minute, second := num(m[4]), num(m[5]), num(m[6])
+	offsetHour, offsetMinute := num(m[9]), num(m[10])
+	// Day 0 of the next month is the last day of this one. For a month out
+	// of range the month check below fails first.
+	daysInMonth := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	for _, f := range []struct {
+		name             string
+		value, low, high int
+	}{
+		{"month", month, 1, 12},
+		{"day", day, 1, daysInMonth},
+		{"hour", hour, 0, 23},
+		{"minute", minute, 0, 59},
+		{"second", second, 0, 59},
+		{"UTC offset hour", offsetHour, 0, 23},
+		{"UTC offset minute", offsetMinute, 0, 59},
+	} {
+		if f.value < f.low || f.value > f.high {
+			return time.Time{}, fmt.Errorf("the %s of %q is out of range", f.name, s)
+		}
+	}
+	nsec := num((m[7] + "000000000")[:9])
+	offset := time.Duration(offsetHour*60+offsetMinute) * time.Minute
+	if m[8] == "-" {
+		offset = -offset
+	}
+	return time.Date(year, time.Month(month), day, hour, minute, second, nsec, time.UTC).Add(-offset), nil
 }
 
 // ---------------------------------------------------------------------------
