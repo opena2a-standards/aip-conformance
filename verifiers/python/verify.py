@@ -25,12 +25,17 @@ the member:
            fixture error: verifierState.agentBindings[0].agentDid: missing
 
 A fixture of any fixtureType whose verifierState is an object holding an
-agentBindings, seenNonces or trustedIssuers that is not an array or null
-prints that FAIL block before any check runs, with the line the Go verifier
-prints for it:
+agentBindings, seenNonces or trustedIssuers that is not an array or null,
+or a trustedIssuers array with an entry that is not a string, null
+included, prints that FAIL block before any check runs, with the line the
+Go verifier prints for it:
 
     FAIL  <path>
            fixture error: verifierState.seenNonces: a number, not an array
+
+The line for an entry names the first one that is not a string, as in
+
+           fixture error: verifierState.trustedIssuers[1]: a number, not a string
 
 Any other error raised while checking a fixture prints a FAIL block with
 the error's type and message. Each of these counts as a fail, and the run
@@ -41,6 +46,10 @@ scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 VERBATIM:
 
     challenge | agentDid | nonce | issuedAt | expiresAt
+
+The signed bytes are that string encoded as UTF-8, as the Go verifier
+encodes it, and a fixture file is read as UTF-8, not in the locale's
+encoding, as the Go verifier reads it.
 
 A timestamp is read as a date-time in the RFC 3339 form _RFC3339_DATE_TIME
 matches, the form the Go verifier reads: issuedAt and expiresAt go into the
@@ -68,13 +77,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 # ---------------------------------------------------------------------------
 
 def canonical_challenge_response_payload(cb: dict) -> bytes:
+    """The bytes the signature covers: the five fields of the challenge body
+    cb joined by "|" and encoded as UTF-8, as the Go verifier encodes them,
+    so a field holding a character outside ASCII goes in as its UTF-8
+    bytes."""
     return "{}|{}|{}|{}|{}".format(
         cb["challenge"],
         cb["agentDid"],
         cb["nonce"],
         _normalize_rfc3339(cb["issuedAt"]),
         _normalize_rfc3339(cb["expiresAt"]),
-    ).encode("ascii")
+    ).encode("utf-8")
 
 
 def _normalize_rfc3339(s: str) -> str:
@@ -113,10 +126,11 @@ class FixtureError(ValueError):
     challengeResponse fixture that carries a challengeResponse payload and no
     verifierState member, and by the §5.1 checks for verifierState and for
     the agentBindings, publicKeyHex, clockRfc3339, seenNonces and
-    trustedIssuers members they read from it. The checks read verifierState
-    only after the signature check passes, except that an agentBindings,
-    seenNonces or trustedIssuers that is not an array or null fails any
-    fixture before its checks run (_check_verifier_state_arrays)."""
+    trustedIssuers members they read from it and for each trustedIssuers
+    entry. The checks read verifierState only after the signature check
+    passes, except that an agentBindings, seenNonces or trustedIssuers that
+    is not an array or null, or a trustedIssuers entry that is not a string,
+    fails any fixture before its checks run (_check_verifier_state_arrays)."""
 
     def __init__(self, member: str, problem: str) -> None:
         super().__init__(f"{member}: {problem}")
@@ -279,22 +293,29 @@ def _array_member(vs: dict, name: str) -> list:
     of that name or holds null there, or FixtureError naming the member when
     it holds any other value, such as 0, false, an empty string or an empty
     object. The Go verifier's encoding/json decodes a missing or null member
-    into an empty slice and fails to decode the others."""
+    into an empty slice and fails to decode the others. For a name in
+    _STRING_ARRAYS, FixtureError names the first entry of the array that is
+    not a string, null included, as in verifierState.trustedIssuers[1]."""
     value = vs.get(name)
     if value is None:
         return []
     if not isinstance(value, list):
         raise FixtureError(f"verifierState.{name}", f"{_json_type(value)}, not an array")
+    if name in _STRING_ARRAYS:
+        for i, entry in enumerate(value):
+            if not isinstance(entry, str):
+                raise FixtureError(f"verifierState.{name}[{i}]", f"{_json_type(entry)}, not a string")
     return value
 
 
 def _check_verifier_state_arrays(f: dict) -> None:
     """FixtureError naming the first of verifierState.agentBindings,
     verifierState.seenNonces and verifierState.trustedIssuers, in that order,
-    that holds a value that is not an array or null, when verifierState is an
-    object. It is checked before any other fixture check, for every
-    fixtureType, as the Go verifier's parseFixture checks it
-    (verifierStateArrays)."""
+    that holds a value that is not an array or null, or the first entry of
+    one of them in _STRING_ARRAYS that is not a string, each member's
+    entries checked after its value, when verifierState is an object. It is
+    checked before any other fixture check, for every fixtureType, as the Go
+    verifier's parseFixture checks it (verifierStateArrays)."""
     vs = f.get("verifierState")
     if isinstance(vs, dict):
         for name in _VERIFIER_STATE_ARRAYS:
@@ -406,16 +427,23 @@ def _emit_rfc3339(t: _Instant) -> str:
 # ---------------------------------------------------------------------------
 
 # The fixture members that hold the protocol messages under test: the two §5.1
-# bodies inside challengeResponse. Their values are not walked for repeated
-# member names; challengeResponse itself is fixture format, walked like the
-# rest of the fixture. The Go verifier's protocolMessages holds the same
-# names.
-_PROTOCOL_MESSAGES = frozenset({"challengeResponse.challenge", "challengeResponse.response"})
+# bodies inside challengeResponse, each by the member names on its path from
+# the top-level object. Their values are not walked for repeated member names;
+# challengeResponse itself is fixture format, walked like the rest of the
+# fixture. The Go verifier's protocolMessages holds the same paths.
+_PROTOCOL_MESSAGES = (("challengeResponse", "challenge"), ("challengeResponse", "response"))
 
 # The verifierState members that hold an array, in the order
 # _check_verifier_state_arrays checks them. The Go verifier's
 # verifierStateArrays holds the same names in the same order.
 _VERIFIER_STATE_ARRAYS = ("agentBindings", "seenNonces", "trustedIssuers")
+
+# The _VERIFIER_STATE_ARRAYS members whose entries must be strings. The Go
+# verifier's encoding/json fails to decode an entry that is a number, a
+# boolean, an array or an object into the string it reads, and decodes a
+# null entry as the empty string. The Go verifier's stringArrays holds the
+# same names.
+_STRING_ARRAYS = frozenset({"trustedIssuers"})
 
 # An unpaired UTF-16 surrogate, which json.loads keeps when a JSON string
 # escapes one with no partner beside it ("\ud800"). The Go verifier's
@@ -438,36 +466,37 @@ class _JSONObject(dict):
         return obj
 
 
-def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> Optional[str]:
+def _repeated_member(label: str, value: Any, skip: Tuple[Tuple[str, ...], ...] = ()) -> Optional[str]:
     """The first member name, in document order, that a JSON object in value
     writes twice, or None when no object repeats a name. The member is named
     object.member and array[index], and a top-level member with an empty
     label by its bare name, as the Go verifier's repeatedMember names it.
     Names are compared as encoding/json unescapes them (_UNPAIRED_SURROGATE)
     and never folded, so VerifierState does not repeat verifierState. The
-    value of a member whose path is in skip is not walked."""
+    value at a path in skip, the member names that lead to it from value, is
+    not walked. A skip path is compared name by name, not as the joined path,
+    so a top-level member named challengeResponse.challenge is walked. Each
+    path in skip holds at least one name."""
     # An explicit stack rather than recursion, so a deeply nested document
     # cannot raise RecursionError here. Each entry walks one array or object:
     # an iterator over its (index or name, value) pairs, the member names seen
-    # so far (None for an array), its piece of the path (label for the first
-    # entry, then [index], .name, or the bare name after an empty path), and
-    # its path cut to one character more than the longest path in skip, which
-    # is enough to tell whether the path is empty and whether skip holds it.
-    # A path grows with its nesting depth, so the walk joins the pieces on the
-    # stack into a whole path only for the member it returns.
-    longest = max(map(len, skip), default=0)
-    stack: List[Tuple[Iterator[Tuple[Any, Any]], Optional[Set[str]], str, str]] = []
+    # so far (None for an array), its index or member name in the array or
+    # object that holds it (None for the first entry), and the rest of each
+    # skip path that begins with the member names leading to it. A path grows
+    # with its nesting depth, so the walk writes out a whole path only for the
+    # member it returns.
+    stack: List[Tuple[Iterator[Tuple[Any, Any]], Optional[Set[str]], Any, Tuple[Tuple[str, ...], ...]]] = []
 
-    def enter(item: Any, piece: str, head: str) -> None:
+    def enter(item: Any, key: Any, rest: Tuple[Tuple[str, ...], ...]) -> None:
         if isinstance(item, list):
-            stack.append((iter(enumerate(item)), None, piece, head))
+            stack.append((iter(enumerate(item)), None, key, rest))
         elif isinstance(item, dict):
             pairs = item.pairs if isinstance(item, _JSONObject) else item.items()
-            stack.append((iter(pairs), set(), piece, head))
+            stack.append((iter(pairs), set(), key, rest))
 
-    enter(value, label, label[: longest + 1])
+    enter(value, None, skip)
     while stack:
-        members, seen, _, head = stack[-1]
+        members, seen, _, rest = stack[-1]
         step = next(members, None)
         if step is None:
             stack.pop()
@@ -476,21 +505,36 @@ def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> O
         if seen is None:
             if not isinstance(item, (list, dict)):
                 continue  # an element that is not an array or object has no members
-            piece = f"[{key}]"
-        else:
-            name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
-            piece = f".{name}" if head else name
-            if name in seen:
-                return "".join(entry[2] for entry in stack) + piece
-            seen.add(name)
-        item_head = head if len(head) > longest else (head + piece)[: longest + 1]
-        if item_head not in skip:
-            enter(item, piece, item_head)
+            enter(item, key, ())  # a skip path names members only, so it leads to no element
+            continue
+        name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
+        if name in seen:
+            return _member_path(label, [entry[2] for entry in stack[1:]] + [name])
+        seen.add(name)
+        item_rest = tuple(path[1:] for path in rest if path[0] == name) if rest else ()
+        if () not in item_rest:
+            enter(item, name, item_rest)
     return None
 
 
+def _member_path(label: str, keys: List[Any]) -> str:
+    """label followed by each key: [index] for an array index, .name for a
+    member name, or the bare name after an empty path, as the Go verifier's
+    pathSegment.appendTo writes them."""
+    path = label
+    for key in keys:
+        if isinstance(key, int):
+            path += f"[{key}]"
+        elif path:
+            path += "." + key
+        else:
+            path = key
+    return path
+
+
 def load_fixture(path: Path) -> dict:
-    """Reads a fixture file. A JSON object outside the two §5.1 bodies that
+    """Reads a fixture file as UTF-8, as the Go verifier reads it, not in
+    the locale's encoding. A JSON object outside the two §5.1 bodies that
     writes one member name twice raises ValueError naming the member: the
     verifier state, expected outcome or body it carries has no single
     reading, and json.loads would keep the later copy alone where the Go
@@ -498,7 +542,7 @@ def load_fixture(path: Path) -> dict:
     read under their exact names, as the Go verifier reads them outside the
     two bodies. A file whose top-level value is not a JSON object raises
     ValueError naming the value's JSON type."""
-    f = json.loads(path.read_text(), object_pairs_hook=_JSONObject.from_pairs)
+    f = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_JSONObject.from_pairs)
     repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
     if repeated is not None:
         raise ValueError(f"{repeated}: duplicate member name")

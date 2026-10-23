@@ -19,6 +19,10 @@ ATP 7-field precedent:
 challenge | agentDid | nonce | issuedAt | expiresAt
 ```
 
+The signed bytes are that string encoded as UTF-8: both reference
+verifiers put a character outside ASCII into the payload as its UTF-8
+bytes.
+
 Both reference verifiers read `issuedAt` and `expiresAt` as RFC 3339
 date-times of the form `YYYY-MM-DDThh:mm:ss`, an optional `.fraction`,
 then `Z`, `+hh:mm` or `-hh:mm`, with `T` and `Z` in upper case and each

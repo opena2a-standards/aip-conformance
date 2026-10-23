@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	aipconformance "github.com/opena2a-standards/aip-conformance"
 )
@@ -721,6 +723,9 @@ var unreadTimestamps = []struct{ value, problem string }{
 	{"2026-05-28T00:03:00Z\n", timestampForm},
 	{"tomorrow", timestampForm},
 	{"", timestampForm},
+	// A year in fullwidth digits, characters outside ASCII that neither
+	// verifier reads as digits.
+	{"２０２６-05-28T00:03:00Z", timestampForm},
 	{"2026-05-28T00:03:00", "{} has no UTC offset"},
 	{"2026-05-28", "{} has no UTC offset"},
 	{"2026-13-28T00:03:00Z", "the month of {} is out of range"},
@@ -1088,13 +1093,105 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 	}
 }
 
+// nonASCIIFields holds a value outside ASCII for each signed field that
+// holds no timestamp, whose characters outside ASCII are of two, three and
+// four UTF-8 bytes in turn; a \u escape writes the four-byte one as a
+// surrogate pair. unreadTimestamps holds one for issuedAt and expiresAt.
+// ../python/test_verify.py holds the same table as NON_ASCII_FIELDS.
+var nonASCIIFields = []struct{ member, value string }{
+	{"agentDid", "did:web:example.org:agents:café"},
+	{"challenge", "挑戦"},
+	{"nonce", "nonce-\U00010348"},
+}
+
+// asciiJSON is the JSON text with each character outside ASCII written as a
+// \u escape, a surrogate pair of them for a character outside the Basic
+// Multilingual Plane, as Python's json.dumps writes it by default.
+func asciiJSON(text string) string {
+	var b strings.Builder
+	for _, r := range text {
+		if r < utf8.RuneSelf {
+			b.WriteRune(r)
+			continue
+		}
+		for _, u := range utf16.Encode([]rune{r}) {
+			fmt.Fprintf(&b, `\u%04x`, u)
+		}
+	}
+	return b.String()
+}
+
+// TestNonASCIIFieldGetsThePythonVerdict: the signed payload is the canonical
+// form encoded as UTF-8, as ../python/verify.py encodes it. Each field of
+// nonASCIIFields, set in the challenge body, echoed by the response and, for
+// agentDid, bound in verifierState, is ACCEPT under a signature made over
+// the UTF-8 payload with the agent's bound key, and REJECT
+// [SIGNATURE_INVALID] under the shipped signature, whether the file writes
+// the value as UTF-8 or with \u escapes. The cases are built from the valid
+// fixture. ../python/test_verify.py builds the same cases and expects the
+// same lines.
+func TestNonASCIIFieldGetsThePythonVerdict(t *testing.T) {
+	for _, tc := range nonASCIIFields {
+		agentDID := "did:opena2a:agent:agent_conformance_test_001"
+		if tc.member == "agentDid" {
+			agentDID = tc.value
+		}
+		for _, signed := range []bool{true, false} {
+			doc := validDoc(t)
+			object(doc, "challengeResponse", "challenge")[tc.member] = tc.value
+			object(doc, "challengeResponse", "response")[tc.member] = tc.value
+			if tc.member == "agentDid" {
+				object(doc, "verifierState")["agentBindings"].([]any)[0].(map[string]any)["agentDid"] = tc.value
+			}
+			category, line := "", "signature: ed25519=true (verified against agentDid "+agentDID+" bound key)"
+			if signed {
+				signChallenge(t, doc, nil)
+				doc["expected"] = map[string]any{"verifyResult": "ACCEPT"}
+			} else {
+				category, line = "SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"
+				doc["expected"] = map[string]any{"verifyResult": "REJECT", "rejectCategory": category}
+			}
+			raw, err := json.MarshalIndent(doc, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, escaped := range []bool{false, true} {
+				text, quoted := string(raw), string(value)
+				if escaped {
+					text, quoted = asciiJSON(text), asciiJSON(quoted)
+				}
+				t.Run(fmt.Sprintf("%s %q signed=%t escaped=%t", tc.member, tc.value, signed, escaped), func(t *testing.T) {
+					if !strings.Contains(text, quoted) {
+						t.Fatalf("the file does not hold %s", quoted)
+					}
+					if ascii := strings.IndexFunc(text, func(r rune) bool { return r >= utf8.RuneSelf }) < 0; ascii != escaped {
+						t.Fatalf("the file is ASCII: %t, want %t", ascii, escaped)
+					}
+					path, code, out := runText(t, text+"\n")
+					if want := passBlock(path, category, line); code != 0 || out != want {
+						t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestRepeatedChallengeResponseMemberIsALoadError: challengeResponse is
 // fixture format around the two §5.1 bodies, so a member it writes twice
 // fails the fixture to load with the line of the other repeated members, and
 // a member spelled in another case is not read as challenge or response. A
-// member repeated inside a body is not a load error. The cases are built from
-// the valid fixture. ../python/test_verify.py builds the same cases and
-// expects the same lines.
+// member repeated inside a body is not a load error. A body is the member
+// challenge or response of the top-level challengeResponse, so a repeat in a
+// top-level member named challengeResponse.challenge or
+// challengeResponse.response, or in challengeResponse.challenge under a
+// member with the empty name, is a load error. The cases are built from the
+// valid fixture. ../python/test_verify.py builds the same cases and expects
+// the same lines.
 func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
 	if err != nil {
@@ -1136,6 +1233,9 @@ func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 		{"response twice, both copies the same", withContainer(m("challenge", challenge), m("response", response), m("response", response)), "challengeResponse.response"},
 		{"challenge twice, the later copy with another nonce", withContainer(m("challenge", challenge), m("challenge", with(challenge, "nonce", probeBytes(3, 16))), m("response", response)), "challengeResponse.challenge"},
 		{"another member twice", withContainer(m("challenge", challenge), m("response", response), m("note", "1"), m("note", "2")), "challengeResponse.note"},
+		{"a top-level member named challengeResponse.challenge", appendMember(t, doc, `"challengeResponse.challenge": {"a": 1, "a": 2}`), "challengeResponse.challenge.a"},
+		{"a top-level member named challengeResponse.response", appendMember(t, doc, `"challengeResponse.response": {"a": 1, "a": 2}`), "challengeResponse.response.a"},
+		{"challengeResponse.challenge inside a member with the empty name", appendMember(t, doc, `"": {"challengeResponse": {"challenge": {"a": 1, "a": 2}}}`), "challengeResponse.challenge.a"},
 	}
 	for _, tc := range repeats {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1265,6 +1365,92 @@ func TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError(t *testing.T) {
 		{"no trustedIssuers", expecting(without("trustedIssuers"), "UNTRUSTED_ISSUER"), "UNTRUSTED_ISSUER", notTrusted},
 	}
 	for _, tc := range empties {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError: each entry of a
+// verifierState.trustedIssuers array must be a string. An entry of another
+// JSON type, null included, fails the fixture when it loads, so before the
+// signature check and for every fixture type, with one line naming the first
+// such entry and its JSON type; a seenNonces that is not an array is named
+// before it. A string entry is compared as written. The cases are built from
+// the valid fixture, and one from a trustScoreComposition fixture.
+// ../python/test_verify.py builds the same cases and expects the same lines.
+func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	var valid Fixture
+	if err := json.Unmarshal(raw, &valid); err != nil {
+		t.Fatal(err)
+	}
+	cb := valid.ChallengeResponse.Challenge
+	issuer := strconv.Quote(cb.IssuerDID)
+	set := func(text, name, value string) string {
+		return strings.Replace(text, memberText(t, text, name), strconv.Quote(name)+": "+value, 1)
+	}
+	entryLine := func(index int, kind string) string {
+		return fmt.Sprintf("fixture error: verifierState.trustedIssuers[%d]: %s, not a string", index, kind)
+	}
+
+	entries := []struct{ value, kind string }{
+		{"0", "a number"}, {"5", "a number"}, {"false", "a boolean"}, {"true", "a boolean"},
+		{"null", "null"}, {"[]", "an array"}, {"[" + issuer + "]", "an array"}, {"{}", "an object"},
+	}
+	for _, e := range entries {
+		// The entry alone, at index 0, and after the trusted issuer, at index 1.
+		for index, issuers := range []string{"[" + e.value + "]", "[" + issuer + ", " + e.value + "]"} {
+			t.Run(fmt.Sprintf("entry %d %s", index, e.value), func(t *testing.T) {
+				path, code, out := runText(t, set(doc, "trustedIssuers", issuers))
+				if want := failBlock(path, entryLine(index, e.kind)); code != 1 || out != want {
+					t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+				}
+			})
+		}
+	}
+
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadErrors := []struct{ name, doc, line string }{
+		{"two entries that are not strings", set(doc, "trustedIssuers", "[5, null]"), entryLine(0, "a number")},
+		{"an entry 5 under a signature that does not verify",
+			strings.Replace(set(doc, "trustedIssuers", "["+issuer+", 5]"), `"issuedAt": "`+cb.IssuedAt+`"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 1),
+			entryLine(1, "a number")},
+		{"an entry 5 in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"trustedIssuers": [5]}`),
+			entryLine(0, "a number")},
+		{"an entry 5 written before a seenNonces 0",
+			set(set(doc, "seenNonces", "0"), "trustedIssuers", "[5]"),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+	}
+	for _, tc := range loadErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
+	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
+	stringEntries := []struct{ name, doc, category, line string }{
+		{"an empty string entry before the issuer", set(doc, "trustedIssuers", `["", `+issuer+`]`), "", accepted},
+		{"an empty string entry alone",
+			set(set(doc, "trustedIssuers", `[""]`), "expected", `{"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}`),
+			"UNTRUSTED_ISSUER", notTrusted},
+	}
+	for _, tc := range stringEntries {
 		t.Run(tc.name, func(t *testing.T) {
 			path, code, out := runText(t, tc.doc)
 			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {

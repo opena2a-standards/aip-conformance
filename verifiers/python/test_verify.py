@@ -4,14 +4,18 @@ spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
-that is not an array or null is a fixture error, a timestamp with no UTC
+that is not an array or null is a fixture error, as is a trustedIssuers
+entry that is not a string, a timestamp with no UTC
 offset is not read in the machine's local time zone, a timestamp is read,
 signed and compared as the Go verifier reads, signs and compares it, and
 the walk that looks for a repeated member name stays within a memory bound
 over 10,000 nested arrays and a time bound over 9,999 nested arrays around
 1,000,000 zeros. The §5.1 checks read the challenge body: the five fields a
 response echoes must equal it, the bound-key and nonce checks read its
-agentDid and nonce, and the trusted-issuer check runs fifth.
+agentDid and nonce, and the trusted-issuer check runs fifth. A signed field
+holding a character outside ASCII goes into the signed payload as its UTF-8
+bytes, as in the Go verifier, and a fixture file is read as UTF-8 under the
+C locale.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -20,10 +24,12 @@ Run from this directory:
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -113,12 +119,13 @@ def local_time_zone(name: str) -> Iterator[None]:
 
 def sign_as_written(doc: dict, **signed: str) -> None:
     """Signs the challenge in doc with the agent's bound key over the
-    canonical payload that holds issuedAt and expiresAt as written, or as
-    the strings signed names for them (issuedAt=..., expiresAt=...)."""
+    canonical payload, encoded as UTF-8, that holds issuedAt and expiresAt
+    as written, or as the strings signed names for them (issuedAt=...,
+    expiresAt=...)."""
     seed = bytes.fromhex(json.loads(AGENT_BOUND_KEY.read_text(encoding="utf-8"))["seedHex"])
     challenge = dict(doc["challengeResponse"]["challenge"], **signed)
     payload = "|".join(challenge[k] for k in ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt"))
-    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("ascii"))
+    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("utf-8"))
     doc["challengeResponse"]["response"]["signature"] = base64.b64encode(signature).decode("ascii").rstrip("=")
 
 
@@ -628,6 +635,9 @@ UNREAD_TIMESTAMPS = (
     ("2026-05-28T00:03:00Z\n", FORM),
     ("tomorrow", FORM),
     ("", FORM),
+    # A year in fullwidth digits, characters outside ASCII that neither
+    # verifier reads as digits.
+    ("２０２６-05-28T00:03:00Z", FORM),
     ("2026-05-28T00:03:00", "{} has no UTC offset"),
     ("2026-05-28", "{} has no UTC offset"),
     ("2026-13-28T00:03:00Z", "the month of {} is out of range"),
@@ -928,11 +938,103 @@ class ChallengeBodyChecksTest(unittest.TestCase):
                 self.assertEqual(code, 0)
 
 
+# A value outside ASCII for each signed field that holds no timestamp,
+# whose characters outside ASCII are of two, three and four UTF-8 bytes in
+# turn; a \u escape writes the four-byte one as a surrogate pair.
+# UNREAD_TIMESTAMPS holds one for issuedAt and expiresAt.
+# ../go/verify_test.go holds the same table.
+NON_ASCII_FIELDS = (
+    ("agentDid", "did:web:example.org:agents:café"),
+    ("challenge", "挑戦"),
+    ("nonce", "nonce-\U00010348"),
+)
+
+# The agentDid of the valid fixture.
+VALID_AGENT_DID = "did:opena2a:agent:agent_conformance_test_001"
+
+
+class NonAsciiFieldTest(unittest.TestCase):
+    """The signed payload is the canonical form encoded as UTF-8, as the Go
+    verifier encodes it. Each field of NON_ASCII_FIELDS, set in the
+    challenge body, echoed by the response and, for agentDid, bound in
+    verifierState, is ACCEPT under a signature made over the UTF-8 payload
+    with the agent's bound key, and REJECT [SIGNATURE_INVALID] under the
+    shipped signature, whether the file writes the value as UTF-8 or with
+    \\u escapes. A file written as UTF-8 is read as UTF-8 under the C
+    locale. The cases are built from the valid fixture. ../go/verify_test.go
+    builds the same cases, all but the one under the C locale, and expects
+    the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def fixture(self, member: str, value: str, signed: bool) -> dict:
+        """The valid fixture with member set to value in both bodies and, for
+        agentDid, in the agentBindings entry: signed over the UTF-8 payload
+        and expecting ACCEPT when signed is true, else under the shipped
+        signature and expecting REJECT [SIGNATURE_INVALID]."""
+        d = json.loads(self.text)
+        for body in d["challengeResponse"].values():
+            body[member] = value
+        if member == "agentDid":
+            d["verifierState"]["agentBindings"][0]["agentDid"] = value
+        if signed:
+            sign_as_written(d)
+            d["expected"] = {"verifyResult": "ACCEPT"}
+        else:
+            d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"}
+        return d
+
+    def test_each_field_gets_the_go_verdict(self) -> None:
+        for member, value in NON_ASCII_FIELDS:
+            agent_did = value if member == "agentDid" else VALID_AGENT_DID
+            for signed, category, line in (
+                (True, "", f"signature: ed25519=true (verified against agentDid {agent_did} bound key)"),
+                (False, "SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"),
+            ):
+                for escaped in (False, True):
+                    with self.subTest(member=member, signed=signed, escaped=escaped):
+                        text = json.dumps(self.fixture(member, value, signed), indent=2, ensure_ascii=escaped) + "\n"
+                        self.assertIn(json.dumps(value, ensure_ascii=escaped), text)
+                        self.assertEqual(text.isascii(), escaped)
+                        path, code, out, err = run_text(text)
+                        self.assertEqual(out, pass_block(path, category, line))
+                        self.assertEqual((code, err), (0, ""))
+
+    def test_file_is_read_as_utf8_under_the_c_locale(self) -> None:
+        # The C locale with UTF-8 mode and locale coercion turned off, under
+        # which the locale's encoding was US-ASCII on macOS when this test
+        # was written. Standard output is UTF-8, for the note.
+        env = dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0", PYTHONIOENCODING="utf-8")
+        encoding = subprocess.run(
+            [sys.executable, "-c", "import locale; print(locale.getpreferredencoding(False))"],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if codecs.lookup(encoding).name == "utf-8":
+            self.skipTest(f"the locale's encoding is {encoding} under LC_ALL=C here")
+        member, value = NON_ASCII_FIELDS[0]
+        text = json.dumps(self.fixture(member, value, True), indent=2, ensure_ascii=False) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "fixture.json"
+            path.write_text(text, encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, str(Path(verify.__file__).resolve()), str(path)],
+                env=env, capture_output=True, encoding="utf-8",
+            )
+        line = f"signature: ed25519=true (verified against agentDid {value} bound key)"
+        self.assertEqual(run.stdout, pass_block(path, "", line))
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+
+
 class RepeatedChallengeResponseMemberTest(unittest.TestCase):
     """challengeResponse is fixture format around the two §5.1 bodies, so a
     member it writes twice fails the fixture to load with the line of the
     other repeated members, and a member spelled in another case is not read
     as challenge or response. A member repeated inside a body is not a load
+    error. A body is the member challenge or response of the top-level
+    challengeResponse, so a repeat in a top-level member named
+    challengeResponse.challenge or challengeResponse.response, or in
+    challengeResponse.challenge under a member with the empty name, is a load
     error. The cases are built from the valid fixture. ../go/verify_test.go
     builds the same cases and expects the same lines."""
 
@@ -975,6 +1077,21 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                 "another member twice",
                 self.with_container(m("challenge", self.challenge), m("response", self.response), m("note", 1), m("note", 2)),
                 "challengeResponse.note",
+            ),
+            (
+                "a top-level member named challengeResponse.challenge",
+                append_member(self.text, '"challengeResponse.challenge": {"a": 1, "a": 2}'),
+                "challengeResponse.challenge.a",
+            ),
+            (
+                "a top-level member named challengeResponse.response",
+                append_member(self.text, '"challengeResponse.response": {"a": 1, "a": 2}'),
+                "challengeResponse.response.a",
+            ),
+            (
+                "challengeResponse.challenge inside a member with the empty name",
+                append_member(self.text, '"": {"challengeResponse": {"challenge": {"a": 1, "a": 2}}}'),
+                "challengeResponse.challenge.a",
             ),
         ]
         for name, text, member in repeats:
@@ -1124,6 +1241,99 @@ class VerifierStateArrayMemberTest(unittest.TestCase):
                 self.assertEqual(out, pass_block(path, category, line))
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
+
+
+class TrustedIssuersEntryTest(unittest.TestCase):
+    """Each entry of a verifierState.trustedIssuers array must be a string.
+    An entry of another JSON type, null included, fails the fixture when it
+    loads, so before the signature check and for every fixture type, with
+    one line naming the first such entry and its JSON type; a seenNonces
+    that is not an array is named before it. A string entry is compared as
+    written. The cases are built from the valid fixture, and one from a
+    trustScoreComposition fixture. ../go/verify_test.go builds the same
+    cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        self.cb = json.loads(self.text)["challengeResponse"]["challenge"]
+
+    def with_issuers(self, issuers: list) -> str:
+        return edited(self.text, lambda d: d["verifierState"].update(trustedIssuers=issuers))
+
+    @staticmethod
+    def entry_line(index: int, kind: str) -> str:
+        return f"fixture error: verifierState.trustedIssuers[{index}]: {kind}, not a string"
+
+    def test_entry_that_is_not_a_string_is_a_fixture_error(self) -> None:
+        issuer = self.cb["issuerDid"]
+        entries = [
+            (0, "a number"), (5, "a number"), (False, "a boolean"), (True, "a boolean"),
+            (None, "null"), ([], "an array"), ([issuer], "an array"), ({}, "an object"),
+        ]
+        for value, kind in entries:
+            # The entry alone, at index 0, and after the trusted issuer, at index 1.
+            for index, issuers in enumerate(([value], [issuer, value])):
+                with self.subTest(json.dumps(issuers)):
+                    path, code, out, err = run_text(self.with_issuers(issuers))
+                    self.assertEqual(out, fail_block(path, self.entry_line(index, kind)))
+                    self.assertEqual(err, "")
+                    self.assertEqual(code, 1)
+
+    def test_fixture_error_comes_before_the_checks_and_for_every_fixture_type(self) -> None:
+        def broken_signature(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [self.cb["issuerDid"], 5]
+            d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        cases = [
+            ("two entries that are not strings", self.with_issuers([5, None]), self.entry_line(0, "a number")),
+            (
+                "an entry 5 under a signature that does not verify",
+                edited(self.text, broken_signature),
+                self.entry_line(1, "a number"),
+            ),
+            (
+                "an entry 5 in a trustScoreComposition fixture",
+                append_member(COMPOSITION.read_text(encoding="utf-8"), '"verifierState": {"trustedIssuers": [5]}'),
+                self.entry_line(0, "a number"),
+            ),
+            (
+                "an entry 5 written before a seenNonces 0",
+                edited(self.text, lambda d: d["verifierState"].update(trustedIssuers=[5], seenNonces=0)),
+                "fixture error: verifierState.seenNonces: a number, not an array",
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+    def test_string_entry_is_compared_as_written(self) -> None:
+        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
+        not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
+
+        def empty_string_alone(d: dict) -> None:
+            d["verifierState"]["trustedIssuers"] = [""]
+            d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}
+
+        cases = [
+            ("an empty string entry before the issuer", self.with_issuers(["", self.cb["issuerDid"]]), "", accepted),
+            ("an empty string entry alone", edited(self.text, empty_string_alone), "UNTRUSTED_ISSUER", not_trusted),
+        ]
+        for name, text, category, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, category, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_check_called_directly_raises_for_the_entry(self) -> None:
+        doc = json.loads(self.text)
+        vs = dict(doc["verifierState"], trustedIssuers=[self.cb["issuerDid"], 5])
+        with self.assertRaises(verify.FixtureError) as raised:
+            verify.verify_challenge_response(doc["challengeResponse"], vs)
+        self.assertEqual(str(raised.exception), "verifierState.trustedIssuers[1]: a number, not a string")
 
 
 # The line both verifiers print for each fixture under fixtures/load-errors/;
