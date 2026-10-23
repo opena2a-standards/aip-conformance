@@ -1375,12 +1375,13 @@ func TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError(t *testing.T) {
 }
 
 // TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError: each entry of a
-// verifierState.trustedIssuers array must be a string. An entry of another
-// JSON type, null included, fails the fixture when it loads, so before the
-// signature check and for every fixture type, with one line naming the first
-// such entry and its JSON type; a seenNonces that is not an array is named
-// before it. A string entry is compared as written. The cases are built from
-// the valid fixture, and one from a trustScoreComposition fixture.
+// verifierState.trustedIssuers array must be a non-empty string. An entry of
+// another JSON type, null included, or the empty string fails the fixture
+// when it loads, so before the signature check and for every fixture type,
+// with one line naming the first such entry and its JSON type, or that it is
+// empty; a seenNonces that is not an array is named before it. A non-empty
+// string entry is compared as written. The cases are built from the valid
+// fixture, and one from a trustScoreComposition fixture.
 // ../python/test_verify.py builds the same cases and expects the same lines.
 func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
@@ -1399,6 +1400,9 @@ func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
 	}
 	entryLine := func(index int, kind string) string {
 		return fmt.Sprintf("fixture error: verifierState.trustedIssuers[%d]: %s, not a string", index, kind)
+	}
+	emptyLine := func(index int) string {
+		return fmt.Sprintf("fixture error: verifierState.trustedIssuers[%d]: an empty string", index)
 	}
 
 	entries := []struct{ value, kind string }{
@@ -1432,6 +1436,18 @@ func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
 		{"an entry 5 written before a seenNonces 0",
 			set(set(doc, "seenNonces", "0"), "trustedIssuers", "[5]"),
 			"fixture error: verifierState.seenNonces: a number, not an array"},
+		{"an empty string entry before the issuer", set(doc, "trustedIssuers", `["", `+issuer+`]`), emptyLine(0)},
+		{"an empty string entry alone",
+			set(set(doc, "trustedIssuers", `[""]`), "expected", `{"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}`),
+			emptyLine(0)},
+		{"an empty string entry after the issuer", set(doc, "trustedIssuers", "["+issuer+`, ""]`), emptyLine(1)},
+		{"an empty string entry after a null entry", set(doc, "trustedIssuers", `[null, ""]`), entryLine(0, "null")},
+		{"an empty string entry under a signature that does not verify",
+			strings.Replace(set(doc, "trustedIssuers", "["+issuer+`, ""]`), `"issuedAt": "`+cb.IssuedAt+`"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2),
+			emptyLine(1)},
+		{"an empty string entry in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"trustedIssuers": [""]}`),
+			emptyLine(0)},
 	}
 	for _, tc := range loadErrors {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1445,15 +1461,222 @@ func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
 	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
 	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
 	stringEntries := []struct{ name, doc, category, line string }{
-		{"an empty string entry before the issuer", set(doc, "trustedIssuers", `["", `+issuer+`]`), "", accepted},
-		{"an empty string entry alone",
-			set(set(doc, "trustedIssuers", `[""]`), "expected", `{"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}`),
+		{"another issuer's DID before the issuer", set(doc, "trustedIssuers", `["did:opena2a:authority:example.org", `+issuer+`]`), "", accepted},
+		{"a space before the issuer", set(doc, "trustedIssuers", `[" ", `+issuer+`]`), "", accepted},
+		{"the issuer with a space after it, alone",
+			set(set(doc, "trustedIssuers", "["+strconv.Quote(cb.IssuerDID+" ")+"]"), "expected", `{"verifyResult": "REJECT", "rejectCategory": "UNTRUSTED_ISSUER"}`),
 			"UNTRUSTED_ISSUER", notTrusted},
 	}
 	for _, tc := range stringEntries {
 		t.Run(tc.name, func(t *testing.T) {
 			path, code, out := runText(t, tc.doc)
 			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestVerifierStateArrayEntryOfAnotherTypeIsAFixtureError: each entry of a
+// verifierState.agentBindings array must be an object, and each entry of a
+// verifierState.seenNonces array a non-empty string. Any other entry, null
+// included, fails the fixture when it loads, so before the signature check
+// and for every fixture type, with one line naming the first such entry and
+// its JSON type, or that it is empty. The members are checked in the order
+// agentBindings, seenNonces, trustedIssuers, whichever is written first, the
+// entries of each after its value. The cases are built from the valid
+// fixture, and two from a trustScoreComposition fixture.
+// ../python/test_verify.py builds the same cases and expects the same lines.
+func TestVerifierStateArrayEntryOfAnotherTypeIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	var valid Fixture
+	if err := json.Unmarshal(raw, &valid); err != nil {
+		t.Fatal(err)
+	}
+	cb := valid.ChallengeResponse.Challenge
+	bound, err := json.Marshal(valid.VerifierState.AgentBindings[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := valid.VerifierState.AgentBindings[0]
+	other.AgentDID = "did:opena2a:agent:not_bound"
+	unbound, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A nonce the verifier has seen that is not the challenge's.
+	seen := strconv.Quote(probeBytes(9, 16))
+	set := func(text, name, value string) string {
+		return strings.Replace(text, memberText(t, text, name), strconv.Quote(name)+": "+value, 1)
+	}
+	line := func(name string, index int, problem string) string {
+		return fmt.Sprintf("fixture error: verifierState.%s[%d]: %s", name, index, problem)
+	}
+	// A later issuedAt in the challenge body and in the response's echo of it
+	// keeps the echo and is a signature that does not verify.
+	badSignature := func(text string) string {
+		return strings.Replace(text, `"issuedAt": "`+cb.IssuedAt+`"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2)
+	}
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type testCase struct{ name, doc, line string }
+	var cases []testCase
+	for _, e := range []struct{ label, value, problem string }{
+		{"null", "null", "null, not an object"}, {"0", "0", "a number, not an object"},
+		{"false", "false", "a boolean, not an object"}, {"empty string", `""`, "a string, not an object"},
+		{"agentDid string", strconv.Quote(cb.AgentDID), "a string, not an object"},
+		{"empty array", "[]", "an array, not an object"},
+		{"bound entry in an array", "[" + string(bound) + "]", "an array, not an object"},
+	} {
+		cases = append(cases,
+			testCase{"agentBindings entry " + e.label + " alone", set(doc, "agentBindings", "["+e.value+"]"), line("agentBindings", 0, e.problem)},
+			testCase{"agentBindings entry " + e.label + " before the bound entry", set(doc, "agentBindings", "["+e.value+", "+string(bound)+"]"), line("agentBindings", 0, e.problem)},
+			testCase{"agentBindings entry " + e.label + " after the bound entry", set(doc, "agentBindings", "["+string(bound)+", "+e.value+"]"), line("agentBindings", 1, e.problem)},
+		)
+	}
+	for _, e := range []struct{ label, value, problem string }{
+		{"null", "null", "null, not a string"}, {"0", "0", "a number, not a string"}, {"1", "1", "a number, not a string"},
+		{"true", "true", "a boolean, not a string"}, {"empty array", "[]", "an array, not a string"},
+		{"challenge nonce in an array", "[" + strconv.Quote(cb.Nonce) + "]", "an array, not a string"},
+		{"empty object", "{}", "an object, not a string"}, {"empty string", `""`, "an empty string"},
+	} {
+		cases = append(cases,
+			testCase{"seenNonces entry " + e.label + " alone", set(doc, "seenNonces", "["+e.value+"]"), line("seenNonces", 0, e.problem)},
+			testCase{"seenNonces entry " + e.label + " after a seen nonce", set(doc, "seenNonces", "["+seen+", "+e.value+"]"), line("seenNonces", 1, e.problem)},
+		)
+	}
+	cases = append(cases,
+		testCase{`seenNonces [null, ""]`, set(doc, "seenNonces", `[null, ""]`), line("seenNonces", 0, "null, not a string")},
+		testCase{"an agentBindings entry null under a signature that does not verify",
+			badSignature(set(doc, "agentBindings", "[null, "+string(bound)+"]")), line("agentBindings", 0, "null, not an object")},
+		testCase{"a seenNonces entry empty under a signature that does not verify",
+			badSignature(set(doc, "seenNonces", `[""]`)), line("seenNonces", 0, "an empty string")},
+		testCase{"an agentBindings entry null in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"agentBindings": [null]}`), line("agentBindings", 0, "null, not an object")},
+		testCase{"a seenNonces entry empty in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"seenNonces": [""]}`), line("seenNonces", 0, "an empty string")},
+		testCase{"a trustedIssuers entry 5 written before a seenNonces entry 5",
+			set(set(doc, "trustedIssuers", "[5]"), "seenNonces", "[5]"), line("seenNonces", 0, "a number, not a string")},
+		testCase{"an agentBindings entry null and a seenNonces entry null",
+			set(set(doc, "agentBindings", "[null]"), "seenNonces", "[null]"), line("agentBindings", 0, "null, not an object")},
+		testCase{"an agentBindings entry null and a seenNonces 0",
+			set(set(doc, "agentBindings", "[null]"), "seenNonces", "0"), line("agentBindings", 0, "null, not an object")},
+		testCase{"an agentBindings 0 and a seenNonces entry null",
+			set(set(doc, "agentBindings", "0"), "seenNonces", "[null]"), "fixture error: verifierState.agentBindings: a number, not an array"},
+		testCase{"a seenNonces entry empty and a trustedIssuers 0",
+			set(set(doc, "seenNonces", `[""]`), "trustedIssuers", "0"), line("seenNonces", 0, "an empty string")},
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
+	for _, tc := range []struct{ name, doc string }{
+		{"seenNonces holding another nonce", set(doc, "seenNonces", "["+seen+"]")},
+		{"seenNonces holding a space", set(doc, "seenNonces", `[" "]`)},
+		{"agentBindings with an entry for another agentDid before the bound entry",
+			set(doc, "agentBindings", "["+string(unbound)+", "+string(bound)+"]")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, "", accepted); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestChallengeResponseFixtureWithoutAVerifierStateObjectIsAFixtureError: a
+// challengeResponse fixture must carry a verifierState object. One that
+// writes no verifierState member, or one that is not an object, null
+// included, fails the fixture when it loads, so before the signature check
+// and before its challengeResponse member is read, with one line naming
+// verifierState. A trustScoreComposition fixture needs no verifierState, and
+// a null one is read as none. The cases are built from the valid fixture and
+// a trustScoreComposition fixture. ../python/test_verify.py builds the same
+// cases and expects the same lines.
+func TestChallengeResponseFixtureWithoutAVerifierStateObjectIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	state := memberText(t, doc, "verifierState")
+	withState := func(text, value string) string {
+		return strings.Replace(text, state, `"verifierState": `+value, 1)
+	}
+	// The member and the line break and indentation after it.
+	without := strings.Replace(doc, state+",\n  ", "", 1)
+	if without == doc {
+		t.Fatal("the valid fixture does not write verifierState before another member")
+	}
+	payload := memberText(t, without, "challengeResponse")
+	neither := strings.Replace(without, ",\n  "+payload, "", 1)
+	if neither == without {
+		t.Fatal("the valid fixture does not write challengeResponse after another member")
+	}
+	issuedAt := `"issuedAt": "2026-05-27T23:58:00Z"`
+	if strings.Count(doc, issuedAt) != 2 {
+		t.Fatalf("the valid fixture does not write %s in both bodies", issuedAt)
+	}
+	// A later issuedAt in the challenge body and in the response's echo of it
+	// keeps the echo and is a signature that does not verify.
+	badSignature := strings.ReplaceAll(withState(doc, "null"), issuedAt, `"issuedAt": "2026-05-27T23:59:00Z"`)
+
+	cases := []struct{ name, doc, line string }{
+		{"no verifierState", without, "fixture error: verifierState: missing"},
+		{"VerifierState in place of verifierState",
+			strings.Replace(doc, state, `"VerifierState"`+strings.TrimPrefix(state, `"verifierState"`), 1),
+			"fixture error: verifierState: missing"},
+		{"verifierState null", withState(doc, "null"), "fixture error: verifierState: null, not an object"},
+		{"verifierState 0", withState(doc, "0"), "fixture error: verifierState: a number, not an object"},
+		{"verifierState false", withState(doc, "false"), "fixture error: verifierState: a boolean, not an object"},
+		{`verifierState ""`, withState(doc, `""`), "fixture error: verifierState: a string, not an object"},
+		{"verifierState []", withState(doc, "[]"), "fixture error: verifierState: an array, not an object"},
+		{"verifierState an array holding the valid verifierState",
+			withState(doc, "["+strings.TrimPrefix(state, `"verifierState": `)+"]"),
+			"fixture error: verifierState: an array, not an object"},
+		{"verifierState null under a signature that does not verify", badSignature,
+			"fixture error: verifierState: null, not an object"},
+		{"no verifierState and no challengeResponse", neither, "fixture error: verifierState: missing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(composition), `"verifierState"`) {
+		t.Fatal("the trustScoreComposition fixture writes a verifierState")
+	}
+	_, _, shipped := runText(t, string(composition))
+	for _, tc := range []struct{ name, doc string }{
+		{"a trustScoreComposition fixture with no verifierState", string(composition)},
+		{"a trustScoreComposition fixture with verifierState null", appendMember(t, string(composition), `"verifierState": null`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			_, block, _ := strings.Cut(shipped, "\n")
+			if want := "PASS  " + path + "\n" + block; code != 0 || out != want || !strings.HasPrefix(shipped, "PASS  ") {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
 		})

@@ -2,6 +2,7 @@
 # Re-running scripts/generate-fixtures MUST reproduce these exact hashes.
 319a982e1c8a96f69b100a642d6c6755ecfb6dce3a9abba2239c68ff10c9cb1d  fixtures/challenge-response-echoed-agent-differs.json
 20b98d88303fe22b9c9b4d18f5c03805bafcb885a4a2bef5a2ddbee5b3ee2d46  fixtures/challenge-response-echoed-nonce-differs.json
+25daeb7d22c2b3a0bd7d4df8be331b39b39c47a46bdd5bdda6f1e0301305f2e7  fixtures/challenge-response-no-trusted-issuers.json
 36c17aa0bf0a7fe546ad0838029338552dd45aee535683649bf0bde05958a50a  fixtures/challenge-response-other-agent-key.json
 b742c9d06c314eb6ed765c1a3edab221b5a310c27121a8f14e54f9e6913d4ba1  fixtures/challenge-response-replay.json
 bc4b0ccd7156da12ad75e35f2b04b53cf0585e5080599b6f14279cd403092b2a  fixtures/challenge-response-stale-challenge.json

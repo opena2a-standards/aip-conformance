@@ -17,7 +17,8 @@ fails decides the reject category:
 3. The verifier clock is before `challenge.expiresAt` (`CHALLENGE_EXPIRED`).
 4. `challenge.nonce` is not in `verifierState.seenNonces` (`NONCE_REPLAY`).
 5. `challenge.issuerDid` is in `verifierState.trustedIssuers`
-   (`UNTRUSTED_ISSUER`).
+   (`UNTRUSTED_ISSUER`). A `trustedIssuers` that is missing, null or empty
+   holds no issuer, so this check refuses every `issuerDid`.
 
 All fixtures use:
 
@@ -38,6 +39,7 @@ All fixtures use:
 | `fixtures/challenge-response-echoed-agent-differs.json` | REJECT (SIGNATURE_INVALID) | A challenge minted for `agent_conformance_test_001`, answered under the key bound to `agent_conformance_test_002` with that agent's DID echoed; `verifierState` binds both agents' keys. The signature verifies over the challenge body; check 1 refuses the echo, naming `response.agentDid`. |
 | `fixtures/challenge-response-other-agent-key.json` | REJECT (UNTRUSTED_KEY) | The same challenge and key, with every challenge field echoed as written. The presented key is bound, but to another agent than `challenge.agentDid`. |
 | `fixtures/challenge-response-untrusted-issuer.json` | REJECT (UNTRUSTED_ISSUER) | The valid transcript under a `verifierState` whose `trustedIssuers` does not hold the challenge's `issuerDid`. Checks 1-4 pass; check 5 refuses. |
+| `fixtures/challenge-response-no-trusted-issuers.json` | REJECT (UNTRUSTED_ISSUER) | The valid transcript under a `verifierState` that writes no `trustedIssuers` member. An absent `trustedIssuers`, like a null or empty one, is the empty trusted-issuer set: the verifier trusts no issuer. Checks 1-4 pass; check 5 refuses. |
 
 ## Load-error fixtures
 
@@ -64,12 +66,23 @@ and a `trustedIssuers`, `agentBindings` or `seenNonces` member of
 `verifierState` that is present must be an array or null (null and a
 missing member read as the empty array).
 
-Both reference verifiers also refuse to load a fixture whose
-`verifierState.trustedIssuers` array holds an entry that is not a string,
-null included; no file here pins that rule. The line names the first such
-entry: for the valid fixture with `trustedIssuers` set to
-`["did:opena2a:authority:opena2a.org", 5]`, both print
-`fixture error: verifierState.trustedIssuers[1]: a number, not a string`.
+Both reference verifiers also refuse to load a `challengeResponse` fixture
+with no `verifierState` object, and a fixture of any type whose
+`verifierState` holds an `agentBindings` entry that is not an object, or a
+`seenNonces` or `trustedIssuers` entry that is not a non-empty string, null
+included; no file here pins those rules. The line names `verifierState`, or
+the first such entry, with the members checked in the order
+`agentBindings`, `seenNonces`, `trustedIssuers`. For the valid fixture with
+one edit, both print:
+
+| Edit | Line both verifiers print |
+|---|---|
+| no `verifierState` member | `fixture error: verifierState: missing` |
+| `verifierState` set to `null` | `fixture error: verifierState: null, not an object` |
+| `agentBindings` set to `[null, <the bound entry>]` | `fixture error: verifierState.agentBindings[0]: null, not an object` |
+| `seenNonces` set to `[null, ""]` | `fixture error: verifierState.seenNonces[0]: null, not a string` |
+| `trustedIssuers` set to `["did:opena2a:authority:opena2a.org", 5]` | `fixture error: verifierState.trustedIssuers[1]: a number, not a string` |
+| `trustedIssuers` set to `["", "did:opena2a:authority:opena2a.org"]` | `fixture error: verifierState.trustedIssuers[0]: an empty string` |
 
 ## §6.1 trust-score composition fixtures
 
