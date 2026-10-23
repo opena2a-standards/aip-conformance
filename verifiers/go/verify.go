@@ -53,6 +53,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -226,40 +227,102 @@ func repeatedMember(label string, raw []byte, skip map[string]bool) (string, boo
 	// Without UseNumber, Token stops with an error at a number such as 1e400
 	// that does not fit a float64, and a repeat after it would go unseen.
 	dec.UseNumber()
-	member, found, _ := walkMembers(dec, label, skip)
+	w := memberWalk{dec: dec, skip: skip, label: label}
+	for path := range skip {
+		w.longest = max(w.longest, len(path))
+	}
+	member, found, _ := w.walk(w.cut(label))
 	return member, found
 }
 
-// walkMembers reads the next JSON value from dec for repeatedMember and
-// returns the first repeated member in it, and whether there is one.
-func walkMembers(dec *json.Decoder, label string, skip map[string]bool) (string, bool, error) {
-	tok, err := dec.Token()
+// memberWalk is the state of one repeatedMember walk. A path grows with its
+// nesting depth, so the walk keeps the path of the value it reads as the
+// label and one segment for each array or object around that value, and
+// writes a whole path out only for the member it returns.
+type memberWalk struct {
+	dec      *json.Decoder
+	skip     map[string]bool
+	longest  int // the length of the longest path in skip
+	label    string
+	segments []pathSegment
+}
+
+// pathSegment is the member name or the array index of a value in the object
+// or array that holds it.
+type pathSegment struct {
+	name  string
+	index int // -1 for a member name
+}
+
+// appendTo appends to path, the path of the object or array that holds s,
+// what s adds to it: [index], or .name, or the bare name when path is empty.
+func (s pathSegment) appendTo(path []byte) []byte {
+	switch {
+	case s.index >= 0:
+		path = append(path, '[')
+		path = strconv.AppendInt(path, int64(s.index), 10)
+		return append(path, ']')
+	case len(path) > 0:
+		path = append(path, '.')
+	}
+	return append(path, s.name...)
+}
+
+// path returns the path of the member at last in the object the walk is
+// reading.
+func (w *memberWalk) path(last pathSegment) string {
+	b := []byte(w.label)
+	for _, s := range w.segments {
+		b = s.appendTo(b)
+	}
+	return string(last.appendTo(b))
+}
+
+// cut returns path cut to one byte more than the longest path in skip, which
+// is enough to tell whether path is empty and whether skip holds it.
+func (w *memberWalk) cut(path string) string {
+	if len(path) > w.longest+1 {
+		return path[:w.longest+1]
+	}
+	return path
+}
+
+// headAt returns the cut path of the value at s in the object or array whose
+// cut path is head.
+func (w *memberWalk) headAt(head string, s pathSegment) string {
+	if len(head) > w.longest {
+		return head
+	}
+	return w.cut(string(s.appendTo([]byte(head))))
+}
+
+// walk reads the next JSON value from dec and returns the first repeated
+// member in it, and whether there is one. head is the value's cut path.
+func (w *memberWalk) walk(head string) (string, bool, error) {
+	tok, err := w.dec.Token()
 	if err != nil {
 		return "", false, err
 	}
 	switch tok {
 	case json.Delim('{'):
 		seen := map[string]bool{}
-		for dec.More() {
-			if tok, err = dec.Token(); err != nil {
+		for w.dec.More() {
+			if tok, err = w.dec.Token(); err != nil {
 				return "", false, err
 			}
 			name, _ := tok.(string)
-			path := name
-			if label != "" {
-				path = label + "." + name
-			}
+			s := pathSegment{name: name, index: -1}
 			if seen[name] {
-				return path, true, nil
+				return w.path(s), true, nil
 			}
 			seen[name] = true
-			if skip[path] {
+			if memberHead := w.headAt(head, s); w.skip[memberHead] {
 				var value json.RawMessage
-				err = dec.Decode(&value)
+				err = w.dec.Decode(&value)
 			} else {
 				var member string
 				var found bool
-				if member, found, err = walkMembers(dec, path, skip); found {
+				if member, found, err = w.walkAt(memberHead, s); found {
 					return member, true, nil
 				}
 			}
@@ -268,16 +331,25 @@ func walkMembers(dec *json.Decoder, label string, skip map[string]bool) (string,
 			}
 		}
 	case json.Delim('['):
-		for i := 0; dec.More(); i++ {
-			if member, found, err := walkMembers(dec, fmt.Sprintf("%s[%d]", label, i), skip); found || err != nil {
+		for i := 0; w.dec.More(); i++ {
+			s := pathSegment{index: i}
+			if member, found, err := w.walkAt(w.headAt(head, s), s); found || err != nil {
 				return member, found, err
 			}
 		}
 	default:
 		return "", false, nil
 	}
-	_, err = dec.Token() // the closing } or ]
+	_, err = w.dec.Token() // the closing } or ]
 	return "", false, err
+}
+
+// walkAt walks the value at s, whose cut path is head.
+func (w *memberWalk) walkAt(head string, s pathSegment) (string, bool, error) {
+	w.segments = append(w.segments, s)
+	member, found, err := w.walk(head)
+	w.segments = w.segments[:len(w.segments)-1]
+	return member, found, err
 }
 
 // exactMembers returns raw with each member of an object that decodes into a

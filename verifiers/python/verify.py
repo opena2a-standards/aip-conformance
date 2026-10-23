@@ -310,35 +310,44 @@ def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> O
     value of a member whose path is in skip is not walked."""
     # An explicit stack rather than recursion, so a deeply nested document
     # cannot raise RecursionError here. Each entry walks one array or object:
-    # its path, an iterator over its (index or name, value) pairs, and the
-    # member names seen so far (None for an array).
-    stack: List[Tuple[str, Iterator[Tuple[Any, Any]], Optional[Set[str]]]] = []
+    # an iterator over its (index or name, value) pairs, the member names seen
+    # so far (None for an array), its piece of the path (label for the first
+    # entry, then [index], .name, or the bare name after an empty path), and
+    # its path cut to one character more than the longest path in skip, which
+    # is enough to tell whether the path is empty and whether skip holds it.
+    # A path grows with its nesting depth, so the walk joins the pieces on the
+    # stack into a whole path only for the member it returns.
+    longest = max(map(len, skip), default=0)
+    stack: List[Tuple[Iterator[Tuple[Any, Any]], Optional[Set[str]], str, str]] = []
 
-    def enter(path: str, item: Any) -> None:
+    def enter(item: Any, piece: str, head: str) -> None:
         if isinstance(item, list):
-            stack.append((path, iter(enumerate(item)), None))
+            stack.append((iter(enumerate(item)), None, piece, head))
         elif isinstance(item, dict):
             pairs = item.pairs if isinstance(item, _JSONObject) else item.items()
-            stack.append((path, iter(pairs), set()))
+            stack.append((iter(pairs), set(), piece, head))
 
-    enter(label, value)
+    enter(value, label, label[: longest + 1])
     while stack:
-        path, members, seen = stack[-1]
+        members, seen, _, head = stack[-1]
         step = next(members, None)
         if step is None:
             stack.pop()
             continue
         key, item = step
         if seen is None:
-            item_path = f"{path}[{key}]"
+            if not isinstance(item, (list, dict)):
+                continue  # an element that is not an array or object has no members
+            piece = f"[{key}]"
         else:
             name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
-            item_path = f"{path}.{name}" if path else name
+            piece = f".{name}" if head else name
             if name in seen:
-                return item_path
+                return "".join(entry[2] for entry in stack) + piece
             seen.add(name)
-        if item_path not in skip:
-            enter(item_path, item)
+        item_head = head if len(head) > longest else (head + piece)[: longest + 1]
+        if item_head not in skip:
+            enter(item, piece, item_head)
     return None
 
 

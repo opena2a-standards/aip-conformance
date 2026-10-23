@@ -3,8 +3,10 @@ twice in a JSON object outside challengeResponse fails to load, a member
 spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
-next fixture, and a timestamp with no UTC offset is not read in the
-machine's local time zone.
+next fixture, a timestamp with no UTC offset is not read in the
+machine's local time zone, and the walk that looks for a repeated member
+name stays within a memory bound over 10,000 nested arrays and a time bound
+over 9,999 nested arrays around 1,000,000 zeros.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -20,6 +22,7 @@ import os
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -195,6 +198,63 @@ class RepeatedWrapperMemberTest(unittest.TestCase):
             self.assertEqual(out, f"PASS  {REPLAY}\n" + verdict)
             self.assertEqual(err, "")
             self.assertEqual(code, 0)
+
+
+def nested_arrays(depth: int, inner: list) -> list:
+    """inner inside depth - 1 more arrays: depth nested arrays in all."""
+    value = inner
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+class RepeatedMemberWalkCostTest(unittest.TestCase):
+    """The repeated-member walk joins a whole path only for the member it
+    returns. Over 10,000 nested arrays its peak traced memory stays under
+    1 KB per level, and over 9,999 nested arrays around 1,000,000 zeros it
+    takes under 5 times the CPU time of the walk over one array of the same
+    zeros. Each document is the replay fixture as load_fixture reads it, with
+    one more top-level member holding the arrays. ../go/verify_test.go bounds
+    what the Go walk allocates over 9,999 nested arrays, empty and around
+    1,000,000 zeros."""
+
+    def walk(self, extra: list) -> Callable[[], None]:
+        """A call of the walk over the replay fixture with one more
+        top-level member, "extra", holding extra."""
+        fixture = json.loads(REPLAY.read_text(encoding="utf-8"), object_pairs_hook=verify._JSONObject.from_pairs)
+        doc = verify._JSONObject.from_pairs([*fixture.pairs, ("extra", extra)])
+        return lambda: self.assertIsNone(verify._repeated_member("", doc, verify._PROTOCOL_MESSAGES))
+
+    def test_deep_document_peak_memory(self) -> None:
+        depth = 10_000
+        walk = self.walk(nested_arrays(depth, []))
+        tracemalloc.start()
+        try:
+            walk()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # When this bound was set the walk peaked at about 320 bytes per level
+        # (Python 3.14.3), and a walk that holds the path of every enclosing
+        # array at over 15,000.
+        self.assertLess(peak, 1024 * depth, f"peak {peak} bytes over {depth} nested arrays")
+
+    def test_wide_document_cpu_time(self) -> None:
+        # 9,999 nested arrays around 1,000,000 zeros against one array of the
+        # same zeros. The fastest of three runs of each is compared, and the
+        # runs alternate, so that one slow spell on a loaded machine does not
+        # decide the result. When this bound was set the nested walk took about
+        # 1.1 times the flat one (Python 3.14.3), and a walk that writes out
+        # the path of every value over 30 times.
+        zeros = [0] * 1_000_000
+        walks = {"flat": self.walk(zeros), "deep": self.walk(nested_arrays(9_999, zeros))}
+        fastest = {name: float("inf") for name in walks}
+        for _ in range(3):
+            for name, walk in walks.items():
+                start = time.process_time()
+                walk()
+                fastest[name] = min(fastest[name], time.process_time() - start)
+        self.assertLess(fastest["deep"], 5 * fastest["flat"], f"fastest CPU seconds {fastest}")
 
 
 class UnreadableFixtureTest(unittest.TestCase):

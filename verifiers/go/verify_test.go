@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -327,6 +328,46 @@ func TestRepeatedWrapperMemberIsALoadError(t *testing.T) {
 			want := "PASS  " + path + "\n       expected: REJECT [NONCE_REPLAY]\n       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
 			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
 				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 0, stdout:\n%s", code, &stdout, &stderr, want)
+			}
+		})
+	}
+}
+
+// TestRepeatedMemberWalkAllocatesInProportionToTheDocument: the repeated-member
+// walk writes out a whole path only for the member it returns, and allocates
+// at most 256 bytes per document byte over the replay fixture with one more
+// top-level member holding 9,999 nested empty arrays, or 9,999 nested arrays
+// around 1,000,000 zeros. With the top-level object that is 10,000 levels;
+// json.Valid rejects a document nested deeper, and parseFixture walks only a
+// document json.Valid accepts. ../python/test_verify.py bounds the Python
+// walk over the same nested arrays.
+func TestRepeatedMemberWalkAllocatesInProportionToTheDocument(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-replay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const depth = 9999
+	cases := []struct{ name, extra string }{
+		{"9,999 nested empty arrays", strings.Repeat("[", depth) + strings.Repeat("]", depth)},
+		{"9,999 nested arrays around 1,000,000 zeros", strings.Repeat("[", depth) + strings.Repeat("0,", 999999) + "0" + strings.Repeat("]", depth)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := []byte(appendMember(t, string(raw), `"extra": `+tc.extra))
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			member, found := repeatedMember("", doc, protocolMessages)
+			runtime.ReadMemStats(&after)
+			if found {
+				t.Fatalf("repeatedMember returned %q, want no repeated member", member)
+			}
+			// When this bound was set the walk allocated about 60 bytes per
+			// document byte in each case (go1.26.3), and a walk that writes
+			// out the path of every value allocated over 6,900.
+			allocated := after.TotalAlloc - before.TotalAlloc
+			if limit := uint64(256 * len(doc)); allocated > limit {
+				t.Errorf("the walk allocated %d bytes over a %d-byte document, want at most %d (256 per byte)", allocated, len(doc), limit)
 			}
 		})
 	}
