@@ -5,9 +5,11 @@ whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings or seenNonces that is not an
 array or null is a fixture error, a timestamp with no UTC offset is not
-read in the machine's local time zone, and the walk that looks for a
-repeated member name stays within a memory bound over 10,000 nested arrays
-and a time bound over 9,999 nested arrays around 1,000,000 zeros.
+read in the machine's local time zone, a timestamp is read, signed and
+compared as the Go verifier reads, signs and compares it, and the walk
+that looks for a repeated member name stays within a memory bound over
+10,000 nested arrays and a time bound over 9,999 nested arrays around
+1,000,000 zeros.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -104,11 +106,12 @@ def local_time_zone(name: str) -> Iterator[None]:
         time.tzset()
 
 
-def sign_as_written(doc: dict) -> None:
+def sign_as_written(doc: dict, **signed: str) -> None:
     """Signs the challenge in doc with the agent's bound key over the
-    canonical payload that holds issuedAt and expiresAt as written."""
+    canonical payload that holds issuedAt and expiresAt as written, or as
+    the strings signed names for them (issuedAt=..., expiresAt=...)."""
     seed = bytes.fromhex(json.loads(AGENT_BOUND_KEY.read_text(encoding="utf-8"))["seedHex"])
-    challenge = doc["challengeResponse"]["challenge"]
+    challenge = dict(doc["challengeResponse"]["challenge"], **signed)
     payload = "|".join(challenge[k] for k in ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt"))
     signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("ascii"))
     doc["challengeResponse"]["response"]["signature"] = base64.b64encode(signature).decode("ascii").rstrip("=")
@@ -566,6 +569,146 @@ class NoUtcOffsetTest(unittest.TestCase):
                     "PASS",
                     f"       expected: REJECT [{category}]\n       observed: REJECT[{category}: {reason}]\n",
                 )
+
+
+# Timestamps both verifiers read: the value, the UTC form the verifier puts
+# in the signed payload, and whether the time is after the valid fixture's
+# verifier clock, 2026-05-28T00:00:00Z. ../go/verify_test.go holds the same
+# table.
+READ_TIMESTAMPS = (
+    ("2026-05-28T00:03:00Z", "2026-05-28T00:03:00Z", True),
+    ("2026-05-28T02:33:00+02:30", "2026-05-28T00:03:00Z", True),
+    ("2026-05-27T23:03:00-01:00", "2026-05-28T00:03:00Z", True),
+    ("2026-05-28T00:03:00-00:00", "2026-05-28T00:03:00Z", True),
+    ("2026-05-28T00:03:00.999999999Z", "2026-05-28T00:03:00Z", True),
+    ("2026-05-28T00:00:00.000000001Z", "2026-05-28T00:00:00Z", True),
+    # A tenth digit of the fraction is cut, which leaves the clock itself.
+    ("2026-05-28T00:00:00.0000000001Z", "2026-05-28T00:00:00Z", False),
+    ("2024-02-29T23:30:00-01:00", "2024-03-01T00:30:00Z", False),
+    ("0000-02-29T12:00:00Z", "0000-02-29T12:00:00Z", False),
+    # A UTC time outside years 1 to 9999.
+    ("0001-01-01T00:00:00+01:00", "0000-12-31T23:00:00Z", False),
+    ("0000-01-01T00:00:00+23:59", "-0001-12-31T00:01:00Z", False),
+    ("9999-12-31T23:59:59-01:00", "10000-01-01T00:59:59Z", True),
+)
+
+FORM = "{} is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm"
+
+# Timestamps neither verifier reads, which each puts in the signed payload
+# as written, and the message each gives, with {} standing for the value as
+# the verifier quotes it (repr here, %q in Go). ../go/verify_test.go holds
+# the same table.
+UNREAD_TIMESTAMPS = (
+    ("2026-05-28T00:03Z", FORM),
+    ("2026-05-28 00:03:00Z", FORM),
+    ("20260528T000300Z", FORM),
+    ("2026-W22-4T00:03:00Z", FORM),
+    ("2026-05-28T00:03:00+0000", FORM),
+    ("2026-05-28T00:03:00+00", FORM),
+    ("2026-05-28T0:03:00Z", FORM),
+    ("2026-05-28T00:03:00,5Z", FORM),
+    ("2026-05-28t00:03:00z", FORM),
+    ("2026-05-28T00:03:00.Z", FORM),
+    ("2026-05-28T00:03:00Z\n", FORM),
+    ("tomorrow", FORM),
+    ("", FORM),
+    ("2026-05-28T00:03:00", "{} has no UTC offset"),
+    ("2026-05-28", "{} has no UTC offset"),
+    ("2026-13-28T00:03:00Z", "the month of {} is out of range"),
+    ("2026-02-29T00:03:00Z", "the day of {} is out of range"),
+    ("2026-05-28T24:00:00Z", "the hour of {} is out of range"),
+    ("2026-05-28T00:60:00Z", "the minute of {} is out of range"),
+    ("2026-05-28T23:59:60Z", "the second of {} is out of range"),
+    ("2026-05-28T00:03:00+24:00", "the UTC offset hour of {} is out of range"),
+    ("2026-05-28T00:03:00+23:60", "the UTC offset minute of {} is out of range"),
+)
+
+
+class TimestampTest(unittest.TestCase):
+    """A timestamp is read in the RFC 3339 form both verifiers read, as the
+    same UTC time, and a timestamp outside it is signed as written: each
+    case in READ_TIMESTAMPS and UNREAD_TIMESTAMPS gets the verdict and
+    category that ../go/verify.go gives the same file, as a challenge
+    issuedAt or expiresAt under the shipped signature or under one made
+    over the payload the verifier builds. The cases are built from the
+    valid fixture."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def assert_verdict(self, edit: Callable[[dict], object], verdict: str, category: str = "", reason: str = "") -> None:
+        """A copy of the valid fixture edited by edit, expecting verdict and
+        category, passes with that verdict and the reason."""
+
+        def expect(d: dict) -> None:
+            edit(d)
+            d["expected"] = {"verifyResult": verdict, **({"rejectCategory": category} if category else {})}
+
+        path, code, out, err = run_text(edited(self.text, expect))
+        if verdict == "ACCEPT":
+            lines = (
+                "       expected: ACCEPT\n       observed: ACCEPT\n"
+                "       signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)\n"
+            )
+        else:
+            lines = f"       expected: REJECT [{category}]\n       observed: REJECT[{category}: {reason}]\n"
+        self.assertEqual(out, f"PASS  {path}\n{lines}\nsummary: 1 pass, 0 fail (1 fixtures)\n")
+        self.assertEqual((code, err), (0, ""))
+
+    def test_each_timestamp_is_read_as_in_go(self) -> None:
+        for value, utc, _ in READ_TIMESTAMPS:
+            with self.subTest(value=value):
+                self.assertEqual(verify._normalize_rfc3339(value), utc)
+        for value, problem in UNREAD_TIMESTAMPS:
+            with self.subTest(value=value):
+                self.assertEqual(verify._normalize_rfc3339(value), value)
+                with self.assertRaises(ValueError) as unread:
+                    verify._parse_rfc3339(value)
+                self.assertEqual(str(unread.exception), problem.format(repr(value)))
+
+    def test_each_timestamp_gets_the_go_verdict(self) -> None:
+        bad_signature = "Ed25519 signature did not verify against the canonical 5-field payload"
+        shipped = "2026-05-28T00:03:00Z"
+        cases = [(value, utc, after, "") for value, utc, after in READ_TIMESTAMPS]
+        cases += [(value, value, False, problem.format(repr(value))) for value, problem in UNREAD_TIMESTAMPS]
+        for value, signed, after, problem in cases:
+
+            def set_member(member: str, sign: bool = False) -> Callable[[dict], None]:
+                def edit(d: dict) -> None:
+                    d["challengeResponse"]["challenge"][member] = value
+                    if sign:
+                        sign_as_written(d, **{member: signed})
+
+                return edit
+
+            with self.subTest(value=value, member="expiresAt", signature="shipped"):
+                if signed == shipped:
+                    self.assert_verdict(set_member("expiresAt"), "ACCEPT")
+                else:
+                    self.assert_verdict(set_member("expiresAt"), "REJECT", "SIGNATURE_INVALID", bad_signature)
+            with self.subTest(value=value, member="issuedAt", signature="over " + signed):
+                self.assert_verdict(set_member("issuedAt", sign=True), "ACCEPT")
+            with self.subTest(value=value, member="expiresAt", signature="over " + signed):
+                if problem:
+                    reason = f"challenge.expiresAt is not RFC 3339: {problem}"
+                    self.assert_verdict(set_member("expiresAt", sign=True), "REJECT", "CHALLENGE_EXPIRED", reason)
+                elif after:
+                    self.assert_verdict(set_member("expiresAt", sign=True), "ACCEPT")
+                else:
+                    reason = f"verifier clock 2026-05-28T00:00:00Z is not before challenge.expiresAt {signed}"
+                    self.assert_verdict(set_member("expiresAt", sign=True), "REJECT", "CHALLENGE_EXPIRED", reason)
+
+    def test_clock_outside_years_1_to_9999_is_read(self) -> None:
+        def clock(value: str) -> Callable[[dict], None]:
+            return lambda d: d["verifierState"].update(clockRfc3339=value)
+
+        self.assert_verdict(clock("0001-01-01T00:00:00+01:00"), "ACCEPT")
+        self.assert_verdict(
+            clock("9999-12-31T23:59:59-01:00"),
+            "REJECT",
+            "CHALLENGE_EXPIRED",
+            "verifier clock 10000-01-01T00:59:59Z is not before challenge.expiresAt 2026-05-28T00:03:00Z",
+        )
 
 
 if __name__ == "__main__":

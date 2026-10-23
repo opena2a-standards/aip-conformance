@@ -39,6 +39,11 @@ scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 VERBATIM:
 
     challenge | agentDid | nonce | issuedAt | expiresAt
+
+A timestamp is read as a date-time in the RFC 3339 form _RFC3339_DATE_TIME
+matches, the form the Go verifier reads: issuedAt and expiresAt go into the
+payload as that time in UTC, written YYYY-MM-DDThh:mm:ssZ (_emit_rfc3339),
+and a value not in that form goes in as written.
 """
 
 from __future__ import annotations
@@ -48,9 +53,9 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Set, Tuple
+from typing import Any, Iterator, List, NamedTuple, Optional, Set, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -72,15 +77,13 @@ def canonical_challenge_response_payload(cb: dict) -> bytes:
 
 def _normalize_rfc3339(s: str) -> str:
     try:
-        dt = _parse_rfc3339(s)
+        t = _parse_rfc3339(s)
     except ValueError:
         # A value _parse_rfc3339 does not read, such as a date-time with no
         # UTC offset, goes into the payload as written, as the Go verifier's
-        # normalizeRFC3339 returns a value time.Parse does not read.
+        # normalizeRFC3339 returns a value its parseRFC3339 does not read.
         return s
-    # Re-emit as RFC 3339 with Z suffix (no microseconds), matching Go's
-    # time.Format(time.RFC3339) on a UTC time.
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _emit_rfc3339(t)
 
 
 def _b64_no_pad_decode(s: str) -> bytes:
@@ -263,35 +266,104 @@ def _check_verifier_state_arrays(f: dict) -> None:
             _array_member(vs, name)
 
 
-def _verifier_clock(vs: dict) -> datetime:
-    """verifierState.clockRfc3339 as a UTC datetime, or FixtureError naming
-    the member when it is missing, is not a string, or is a string that
+def _verifier_clock(vs: dict) -> _Instant:
+    """verifierState.clockRfc3339 as a UTC time, or FixtureError naming the
+    member when it is missing, is not a string, or is a string that
     _parse_rfc3339 cannot read."""
     clock = _member(vs, "verifierState", "clockRfc3339")
     if not isinstance(clock, str):
         raise FixtureError("verifierState.clockRfc3339", f"{_json_type(clock)}, not a string")
     try:
         return _parse_rfc3339(clock)
-    except (ValueError, OverflowError) as e:
+    except ValueError as e:
         raise FixtureError("verifierState.clockRfc3339", f"cannot be read as a date-time ({e})") from None
 
 
-def _parse_rfc3339(s: str) -> datetime:
-    """s as a UTC datetime, or ValueError when datetime.fromisoformat does
-    not read s or s has no UTC offset. fromisoformat reads a date and time
-    with no offset, or a date alone, as a naive datetime, which astimezone
-    would take to be in the machine's local time zone. RFC 3339 requires
-    the offset, and the Go verifier's time.Parse does not read such a
-    value."""
-    # Python's datetime.fromisoformat handles "Z" only from 3.11+.
-    dt = datetime.fromisoformat((s[:-1] + "+00:00") if s.endswith("Z") else s)
-    if dt.tzinfo is None:
-        raise ValueError(f"{s!r} has no UTC offset")
-    return dt.astimezone(timezone.utc)
+# The RFC 3339 date-time form both verifiers read; the Go verifier's
+# rfc3339DateTime holds the same pattern. A four-digit year and two-digit
+# month, day, hour, minute and second, an optional fraction of a second
+# after a period, and Z or a UTC offset of the form +hh:mm or -hh:mm, with T
+# and Z in upper case. Matched with fullmatch, so no trailing newline.
+_RFC3339_DATE_TIME = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))"
+)
+
+# A date alone, or a date and time with no UTC offset (the Go verifier's
+# noUTCOffset).
+_NO_UTC_OFFSET = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)?")
+
+# The proleptic Gregorian calendar repeats every 400 years, which hold this
+# many days. date covers years 1 to 9999; _parse_rfc3339 reads year 0, and
+# its UTC offset can move a time into year -1 or 10000.
+_DAYS_IN_400_YEARS = 146097
+_UNIX_EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 
 
-def _emit_rfc3339(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+class _Instant(NamedTuple):
+    """A UTC time as seconds since 1970-01-01T00:00:00Z and nanoseconds
+    into the second, the parts a Go time.Time compares by; instants compare
+    as tuples. A datetime cannot hold a time in year 0 or 10000."""
+
+    seconds: int
+    nanos: int
+
+
+def _days_in_month(year: int, month: int) -> int:
+    """The days in month (1 to 12) of year in the proleptic Gregorian
+    calendar."""
+    if month == 2:
+        return 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28
+    return 30 if month in (4, 6, 9, 11) else 31
+
+
+def _parse_rfc3339(s: str) -> _Instant:
+    """s as a UTC time, or ValueError when s is not an RFC 3339 date-time
+    in the form _RFC3339_DATE_TIME matches. The month, day (by the month
+    and year), hour, minute, second and offset must be in range, which
+    leaves out a second of 60, an hour of 24 and an offset hour of 24.
+    The fraction is cut to nanoseconds. The Go verifier's parseRFC3339
+    reads the same values as the same times, with the same messages, Go
+    quoting the value as %q does."""
+    m = _RFC3339_DATE_TIME.fullmatch(s)
+    if m is None:
+        if _NO_UTC_OFFSET.fullmatch(s):
+            raise ValueError(f"{s!r} has no UTC offset")
+        raise ValueError(f"{s!r} is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm")
+    year, month, day, hour, minute, second = (int(g) for g in m.group(1, 2, 3, 4, 5, 6))
+    sign, offset_hour, offset_minute = m.group(8), int(m.group(9) or 0), int(m.group(10) or 0)
+    for field, value, low, high in (
+        ("month", month, 1, 12),
+        ("day", day, 1, _days_in_month(year, month)),
+        ("hour", hour, 0, 23),
+        ("minute", minute, 0, 59),
+        ("second", second, 0, 59),
+        ("UTC offset hour", offset_hour, 0, 23),
+        ("UTC offset minute", offset_minute, 0, 59),
+    ):
+        if not low <= value <= high:
+            raise ValueError(f"the {field} of {s!r} is out of range")
+    # Year 0 has the calendar of year 400.
+    days = date(year or 400, month, day).toordinal() - (_DAYS_IN_400_YEARS if year == 0 else 0) - _UNIX_EPOCH_ORDINAL
+    offset = (offset_hour * 60 + offset_minute) * 60 * (-1 if sign == "-" else 1)
+    nanos = int((m.group(7) or "").ljust(9, "0")[:9])
+    return _Instant(days * 86400 + hour * 3600 + minute * 60 + second - offset, nanos)
+
+
+def _emit_rfc3339(t: _Instant) -> str:
+    """t in UTC as YYYY-MM-DDThh:mm:ssZ, without its fraction of a second:
+    the Go verifier's t.UTC().Format(time.RFC3339), which writes year -1 as
+    -0001 and year 10000 as 10000."""
+    days, second = divmod(t.seconds, 86400)
+    ordinal, years = days + _UNIX_EPOCH_ORDINAL, 0
+    if ordinal < 1:
+        ordinal, years = ordinal + _DAYS_IN_400_YEARS, -400
+    elif ordinal > date.max.toordinal():
+        ordinal, years = ordinal - _DAYS_IN_400_YEARS, 400
+    d = date.fromordinal(ordinal)
+    year = d.year + years
+    year_text = f"-{-year:04d}" if year < 0 else f"{year:04d}"
+    return f"{year_text}-{d.month:02d}-{d.day:02d}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}Z"
 
 
 # ---------------------------------------------------------------------------
