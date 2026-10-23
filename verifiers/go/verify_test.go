@@ -503,3 +503,74 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifierStateArrayOfAnotherTypeIsAFixtureError: a verifierState
+// agentBindings or seenNonces that holds 0, false, "" or {} fails its fixture
+// with a fixture error naming the member and the value's JSON type, before
+// any check runs: under a signature that does not verify, and in a
+// trustScoreComposition fixture, too. The cases are built from the replay
+// fixture, whose REJECT [NONCE_REPLAY] rests on both members.
+// ../python/test_verify.py builds the same cases and expects the same lines.
+func TestVerifierStateArrayOfAnotherTypeIsAFixtureError(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	replay := read("challenge-response-replay.json")
+	replaced := func(text, from, to string) string {
+		t.Helper()
+		if !strings.Contains(text, from) {
+			t.Fatalf("the fixture does not write %s", from)
+		}
+		return strings.Replace(text, from, to, 1)
+	}
+	// The challenge comes before the response in the fixture, so the first
+	// issuedAt is the signed one.
+	badSignature := replaced(replaced(replay,
+		`"issuedAt": "2026-05-27T23:59:00Z"`, `"issuedAt": "2026-05-27T23:58:00Z"`),
+		`"rejectCategory": "NONCE_REPLAY"`, `"rejectCategory": "SIGNATURE_INVALID"`)
+
+	type testCase struct{ name, doc, line string }
+	var cases []testCase
+	for _, member := range []string{"agentBindings", "seenNonces"} {
+		for _, v := range []struct{ value, kind string }{
+			{"0", "a number"}, {"false", "a boolean"}, {`""`, "a string"}, {"{}", "an object"},
+		} {
+			cases = append(cases, testCase{
+				member + " " + v.value,
+				replaced(replay, memberText(t, replay, member), strconv.Quote(member)+": "+v.value),
+				"fixture error: verifierState." + member + ": " + v.kind + ", not an array",
+			})
+		}
+	}
+	cases = append(cases,
+		testCase{"seenNonces 0 under a signature that does not verify",
+			replaced(badSignature, memberText(t, badSignature, "seenNonces"), `"seenNonces": 0`),
+			"fixture error: verifierState.seenNonces: a number, not an array"},
+		testCase{"agentBindings and seenNonces both 0",
+			replaced(replaced(replay, memberText(t, replay, "seenNonces"), `"seenNonces": 0`),
+				memberText(t, replay, "agentBindings"), `"agentBindings": 0`),
+			"fixture error: verifierState.agentBindings: a number, not an array"},
+		testCase{"seenNonces {} in a trustScoreComposition fixture",
+			appendMember(t, read("trust-score-measured-six-factors-capped.json"), `"verifierState": {"seenNonces": {}}`),
+			"fixture error: verifierState.seenNonces: an object, not an array"},
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fixture.json")
+			if err := os.WriteFile(path, []byte(tc.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{path}, &stdout, &stderr)
+			want := "FAIL  " + path + "\n       " + tc.line + "\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
+			if code != 1 || stdout.String() != want || stderr.Len() != 0 {
+				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 1, stdout:\n%s", code, &stdout, &stderr, want)
+			}
+		})
+	}
+}

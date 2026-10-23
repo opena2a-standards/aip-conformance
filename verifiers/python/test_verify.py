@@ -3,10 +3,11 @@ twice in a JSON object outside challengeResponse fails to load, a member
 spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
-next fixture, a timestamp with no UTC offset is not read in the
-machine's local time zone, and the walk that looks for a repeated member
-name stays within a memory bound over 10,000 nested arrays and a time bound
-over 9,999 nested arrays around 1,000,000 zeros.
+next fixture, a verifierState agentBindings or seenNonces that is not an
+array or null is a fixture error, a timestamp with no UTC offset is not
+read in the machine's local time zone, and the walk that looks for a
+repeated member name stays within a memory bound over 10,000 nested arrays
+and a time bound over 9,999 nested arrays around 1,000,000 zeros.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -408,6 +409,78 @@ class UnreadableFixtureTest(unittest.TestCase):
         )
         self.assertEqual(err, "")
         self.assertEqual(code, 0)
+
+
+class VerifierStateArrayOfAnotherTypeTest(unittest.TestCase):
+    """A verifierState agentBindings or seenNonces that holds 0, false, ""
+    or {} fails its fixture with a fixture error naming the member and the
+    value's JSON type, before any check runs: under a signature that does
+    not verify, and in a trustScoreComposition fixture, too. The cases are
+    built from the replay fixture, whose REJECT [NONCE_REPLAY] rests on both
+    members. ../go/verify_test.go builds the same cases and expects the
+    same lines."""
+
+    VALUES = ((0, "a number"), (False, "a boolean"), ("", "a string"), ({}, "an object"))
+
+    def assert_fixture_error(self, text: str, line: str) -> None:
+        path, code, out, err = run_text(text)
+        self.assertEqual(out, f"FAIL  {path}\n       {line}\n\nsummary: 0 pass, 1 fail (1 fixtures)\n")
+        self.assertEqual(err, "")
+        self.assertEqual(code, 1)
+
+    def test_value_that_is_not_an_array_or_null_is_a_fixture_error(self) -> None:
+        replay = REPLAY.read_text(encoding="utf-8")
+
+        def bad_signature(d: dict) -> None:
+            d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:58:00Z"
+            d["expected"]["rejectCategory"] = "SIGNATURE_INVALID"
+            d["verifierState"]["seenNonces"] = 0
+
+        def both(d: dict) -> None:
+            d["verifierState"]["seenNonces"] = 0
+            d["verifierState"]["agentBindings"] = 0
+
+        cases = [
+            (
+                f"{member} {json.dumps(value)}",
+                edited(replay, lambda d, m=member, v=value: d["verifierState"].update({m: v})),
+                f"fixture error: verifierState.{member}: {kind}, not an array",
+            )
+            for member in ("agentBindings", "seenNonces")
+            for value, kind in self.VALUES
+        ] + [
+            (
+                "seenNonces 0 under a signature that does not verify",
+                edited(replay, bad_signature),
+                "fixture error: verifierState.seenNonces: a number, not an array",
+            ),
+            (
+                "agentBindings and seenNonces both 0",
+                edited(replay, both),
+                "fixture error: verifierState.agentBindings: a number, not an array",
+            ),
+            (
+                "seenNonces {} in a trustScoreComposition fixture",
+                append_member(
+                    (FIXTURES / "trust-score-measured-six-factors-capped.json").read_text(encoding="utf-8"),
+                    '"verifierState": {"seenNonces": {}}',
+                ),
+                "fixture error: verifierState.seenNonces: an object, not an array",
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                self.assert_fixture_error(text, line)
+
+    def test_checks_called_directly_raise_for_the_member(self) -> None:
+        doc = json.loads(REPLAY.read_text(encoding="utf-8"))
+        for member in ("agentBindings", "seenNonces"):
+            for value, kind in self.VALUES:
+                with self.subTest(f"{member} {json.dumps(value)}"):
+                    vs = dict(doc["verifierState"], **{member: value})
+                    with self.assertRaises(verify.FixtureError) as raised:
+                        verify.verify_challenge_response(doc["challengeResponse"], vs)
+                    self.assertEqual(str(raised.exception), f"verifierState.{member}: {kind}, not an array")
 
 
 @unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is not available on this platform")

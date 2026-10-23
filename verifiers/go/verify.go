@@ -31,6 +31,14 @@
 // fixture counts as a fail, and the run goes on to the next fixture and
 // prints the summary line.
 //
+// A fixture of any fixtureType whose verifierState is an object holding an
+// agentBindings or seenNonces that is not an array or null prints that FAIL
+// block before any check runs, with the line the Python verifier prints for
+// it:
+//
+//	FAIL  <path>
+//	       fixture error: verifierState.seenNonces: a number, not an array
+//
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 // VERBATIM:
@@ -44,6 +52,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -171,8 +180,10 @@ var protocolMessagesType = reflect.TypeOf(ChallengeResponse{})
 // the later copy omits, where the Python verifier reads the later copy
 // alone. Outside challengeResponse each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
-// reports for it. An agentBindings entry that writes no publicKeyHex, or a
-// null one, is marked for the checks (markPublicKeyHexProblems).
+// reports for it. A verifierState agentBindings or seenNonces that is not an
+// array or null is a *memberError (verifierStateArrays). An agentBindings
+// entry that writes no publicKeyHex, or a null one, is marked for the checks
+// (markPublicKeyHexProblems).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -180,12 +191,75 @@ func parseFixture(b []byte) (Fixture, error) {
 			return f, fmt.Errorf("%s: duplicate member name", member)
 		}
 		b = exactMembers(b, reflect.TypeOf(f))
+		if err := checkVerifierStateArrays(b); err != nil {
+			return f, err
+		}
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
 		return f, err
 	}
 	markPublicKeyHexProblems(b, f.VerifierState.AgentBindings)
 	return f, nil
+}
+
+// memberError is a fixture member that holds a value the verifier cannot
+// use. runFixture prints it as a fixture error, the line the Python
+// verifier's FixtureError prints for the same member.
+type memberError struct {
+	member, problem string
+}
+
+func (e *memberError) Error() string { return e.member + ": " + e.problem }
+
+// verifierStateArrays names the verifierState members that hold an array, in
+// the order checkVerifierStateArrays checks them. The Python verifier's
+// _VERIFIER_STATE_ARRAYS holds the same names in the same order.
+var verifierStateArrays = []string{"agentBindings", "seenNonces"}
+
+// checkVerifierStateArrays returns a *memberError naming the first
+// verifierStateArrays member of the verifierState object in raw that holds a
+// value that is not an array or null, such as 0, false, "" or {}, which
+// encoding/json fails to decode into a slice. It returns nil when there is
+// none, or when verifierState is not an object, which the decode reports.
+func checkVerifierStateArrays(raw []byte) error {
+	var doc struct {
+		VerifierState map[string]json.RawMessage `json:"verifierState"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	for _, name := range verifierStateArrays {
+		value, ok := doc.VerifierState[name]
+		if !ok {
+			continue
+		}
+		if kind := jsonType(value); kind != "an array" && kind != "null" {
+			return &memberError{"verifierState." + name, kind + ", not an array"}
+		}
+	}
+	return nil
+}
+
+// jsonType names the JSON type of the valid JSON value raw as the Python
+// verifier's _json_type names it.
+func jsonType(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "a number"
+	}
+	switch trimmed[0] {
+	case 'n':
+		return "null"
+	case 't', 'f':
+		return "a boolean"
+	case '"':
+		return "a string"
+	case '[':
+		return "an array"
+	case '{':
+		return "an object"
+	}
+	return "a number"
 }
 
 // markPublicKeyHexProblems sets publicKeyHexProblem on each entry of
@@ -840,6 +914,11 @@ func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) boo
 		return false
 	}
 	f, err := parseFixture(b)
+	var unusable *memberError
+	if errors.As(err, &unusable) {
+		fmt.Fprintf(w, "FAIL  %s\n       fixture error: %v\n", path, unusable)
+		return false
+	}
 	if err != nil {
 		fmt.Fprintf(w, "FAIL  %s\n       parse error: %v\n", path, err)
 		return false
