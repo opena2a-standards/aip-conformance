@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	aipconformance "github.com/opena2a-standards/aip-conformance"
 )
@@ -721,6 +723,9 @@ var unreadTimestamps = []struct{ value, problem string }{
 	{"2026-05-28T00:03:00Z\n", timestampForm},
 	{"tomorrow", timestampForm},
 	{"", timestampForm},
+	// A year in fullwidth digits, characters outside ASCII that neither
+	// verifier reads as digits.
+	{"２０２６-05-28T00:03:00Z", timestampForm},
 	{"2026-05-28T00:03:00", "{} has no UTC offset"},
 	{"2026-05-28", "{} has no UTC offset"},
 	{"2026-13-28T00:03:00Z", "the month of {} is out of range"},
@@ -1085,6 +1090,94 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
 		})
+	}
+}
+
+// nonASCIIFields holds a value outside ASCII for each signed field that
+// holds no timestamp, whose characters outside ASCII are of two, three and
+// four UTF-8 bytes in turn; a \u escape writes the four-byte one as a
+// surrogate pair. unreadTimestamps holds one for issuedAt and expiresAt.
+// ../python/test_verify.py holds the same table as NON_ASCII_FIELDS.
+var nonASCIIFields = []struct{ member, value string }{
+	{"agentDid", "did:web:example.org:agents:café"},
+	{"challenge", "挑戦"},
+	{"nonce", "nonce-\U00010348"},
+}
+
+// asciiJSON is the JSON text with each character outside ASCII written as a
+// \u escape, a surrogate pair of them for a character outside the Basic
+// Multilingual Plane, as Python's json.dumps writes it by default.
+func asciiJSON(text string) string {
+	var b strings.Builder
+	for _, r := range text {
+		if r < utf8.RuneSelf {
+			b.WriteRune(r)
+			continue
+		}
+		for _, u := range utf16.Encode([]rune{r}) {
+			fmt.Fprintf(&b, `\u%04x`, u)
+		}
+	}
+	return b.String()
+}
+
+// TestNonASCIIFieldGetsThePythonVerdict: the signed payload is the canonical
+// form encoded as UTF-8, as ../python/verify.py encodes it. Each field of
+// nonASCIIFields, set in the challenge body, echoed by the response and, for
+// agentDid, bound in verifierState, is ACCEPT under a signature made over
+// the UTF-8 payload with the agent's bound key, and REJECT
+// [SIGNATURE_INVALID] under the shipped signature, whether the file writes
+// the value as UTF-8 or with \u escapes. The cases are built from the valid
+// fixture. ../python/test_verify.py builds the same cases and expects the
+// same lines.
+func TestNonASCIIFieldGetsThePythonVerdict(t *testing.T) {
+	for _, tc := range nonASCIIFields {
+		agentDID := "did:opena2a:agent:agent_conformance_test_001"
+		if tc.member == "agentDid" {
+			agentDID = tc.value
+		}
+		for _, signed := range []bool{true, false} {
+			doc := validDoc(t)
+			object(doc, "challengeResponse", "challenge")[tc.member] = tc.value
+			object(doc, "challengeResponse", "response")[tc.member] = tc.value
+			if tc.member == "agentDid" {
+				object(doc, "verifierState")["agentBindings"].([]any)[0].(map[string]any)["agentDid"] = tc.value
+			}
+			category, line := "", "signature: ed25519=true (verified against agentDid "+agentDID+" bound key)"
+			if signed {
+				signChallenge(t, doc, nil)
+				doc["expected"] = map[string]any{"verifyResult": "ACCEPT"}
+			} else {
+				category, line = "SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"
+				doc["expected"] = map[string]any{"verifyResult": "REJECT", "rejectCategory": category}
+			}
+			raw, err := json.MarshalIndent(doc, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, escaped := range []bool{false, true} {
+				text, quoted := string(raw), string(value)
+				if escaped {
+					text, quoted = asciiJSON(text), asciiJSON(quoted)
+				}
+				t.Run(fmt.Sprintf("%s %q signed=%t escaped=%t", tc.member, tc.value, signed, escaped), func(t *testing.T) {
+					if !strings.Contains(text, quoted) {
+						t.Fatalf("the file does not hold %s", quoted)
+					}
+					if ascii := strings.IndexFunc(text, func(r rune) bool { return r >= utf8.RuneSelf }) < 0; ascii != escaped {
+						t.Fatalf("the file is ASCII: %t, want %t", ascii, escaped)
+					}
+					path, code, out := runText(t, text+"\n")
+					if want := passBlock(path, category, line); code != 0 || out != want {
+						t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+					}
+				})
+			}
+		}
 	}
 }
 

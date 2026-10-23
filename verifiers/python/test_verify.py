@@ -12,7 +12,10 @@ the walk that looks for a repeated member name stays within a memory bound
 over 10,000 nested arrays and a time bound over 9,999 nested arrays around
 1,000,000 zeros. The §5.1 checks read the challenge body: the five fields a
 response echoes must equal it, the bound-key and nonce checks read its
-agentDid and nonce, and the trusted-issuer check runs fifth.
+agentDid and nonce, and the trusted-issuer check runs fifth. A signed field
+holding a character outside ASCII goes into the signed payload as its UTF-8
+bytes, as in the Go verifier, and a fixture file is read as UTF-8 under the
+C locale.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -21,10 +24,12 @@ Run from this directory:
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -114,12 +119,13 @@ def local_time_zone(name: str) -> Iterator[None]:
 
 def sign_as_written(doc: dict, **signed: str) -> None:
     """Signs the challenge in doc with the agent's bound key over the
-    canonical payload that holds issuedAt and expiresAt as written, or as
-    the strings signed names for them (issuedAt=..., expiresAt=...)."""
+    canonical payload, encoded as UTF-8, that holds issuedAt and expiresAt
+    as written, or as the strings signed names for them (issuedAt=...,
+    expiresAt=...)."""
     seed = bytes.fromhex(json.loads(AGENT_BOUND_KEY.read_text(encoding="utf-8"))["seedHex"])
     challenge = dict(doc["challengeResponse"]["challenge"], **signed)
     payload = "|".join(challenge[k] for k in ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt"))
-    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("ascii"))
+    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("utf-8"))
     doc["challengeResponse"]["response"]["signature"] = base64.b64encode(signature).decode("ascii").rstrip("=")
 
 
@@ -629,6 +635,9 @@ UNREAD_TIMESTAMPS = (
     ("2026-05-28T00:03:00Z\n", FORM),
     ("tomorrow", FORM),
     ("", FORM),
+    # A year in fullwidth digits, characters outside ASCII that neither
+    # verifier reads as digits.
+    ("２０２６-05-28T00:03:00Z", FORM),
     ("2026-05-28T00:03:00", "{} has no UTC offset"),
     ("2026-05-28", "{} has no UTC offset"),
     ("2026-13-28T00:03:00Z", "the month of {} is out of range"),
@@ -927,6 +936,94 @@ class ChallengeBodyChecksTest(unittest.TestCase):
                 self.assertEqual(out, pass_block(path, category, line))
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
+
+
+# A value outside ASCII for each signed field that holds no timestamp,
+# whose characters outside ASCII are of two, three and four UTF-8 bytes in
+# turn; a \u escape writes the four-byte one as a surrogate pair.
+# UNREAD_TIMESTAMPS holds one for issuedAt and expiresAt.
+# ../go/verify_test.go holds the same table.
+NON_ASCII_FIELDS = (
+    ("agentDid", "did:web:example.org:agents:café"),
+    ("challenge", "挑戦"),
+    ("nonce", "nonce-\U00010348"),
+)
+
+# The agentDid of the valid fixture.
+VALID_AGENT_DID = "did:opena2a:agent:agent_conformance_test_001"
+
+
+class NonAsciiFieldTest(unittest.TestCase):
+    """The signed payload is the canonical form encoded as UTF-8, as the Go
+    verifier encodes it. Each field of NON_ASCII_FIELDS, set in the
+    challenge body, echoed by the response and, for agentDid, bound in
+    verifierState, is ACCEPT under a signature made over the UTF-8 payload
+    with the agent's bound key, and REJECT [SIGNATURE_INVALID] under the
+    shipped signature, whether the file writes the value as UTF-8 or with
+    \\u escapes. A file written as UTF-8 is read as UTF-8 under the C
+    locale. The cases are built from the valid fixture. ../go/verify_test.go
+    builds the same cases, all but the one under the C locale, and expects
+    the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def fixture(self, member: str, value: str, signed: bool) -> dict:
+        """The valid fixture with member set to value in both bodies and, for
+        agentDid, in the agentBindings entry: signed over the UTF-8 payload
+        and expecting ACCEPT when signed is true, else under the shipped
+        signature and expecting REJECT [SIGNATURE_INVALID]."""
+        d = json.loads(self.text)
+        for body in d["challengeResponse"].values():
+            body[member] = value
+        if member == "agentDid":
+            d["verifierState"]["agentBindings"][0]["agentDid"] = value
+        if signed:
+            sign_as_written(d)
+            d["expected"] = {"verifyResult": "ACCEPT"}
+        else:
+            d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"}
+        return d
+
+    def test_each_field_gets_the_go_verdict(self) -> None:
+        for member, value in NON_ASCII_FIELDS:
+            agent_did = value if member == "agentDid" else VALID_AGENT_DID
+            for signed, category, line in (
+                (True, "", f"signature: ed25519=true (verified against agentDid {agent_did} bound key)"),
+                (False, "SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"),
+            ):
+                for escaped in (False, True):
+                    with self.subTest(member=member, signed=signed, escaped=escaped):
+                        text = json.dumps(self.fixture(member, value, signed), indent=2, ensure_ascii=escaped) + "\n"
+                        self.assertIn(json.dumps(value, ensure_ascii=escaped), text)
+                        self.assertEqual(text.isascii(), escaped)
+                        path, code, out, err = run_text(text)
+                        self.assertEqual(out, pass_block(path, category, line))
+                        self.assertEqual((code, err), (0, ""))
+
+    def test_file_is_read_as_utf8_under_the_c_locale(self) -> None:
+        # The C locale with UTF-8 mode and locale coercion turned off, under
+        # which the locale's encoding was US-ASCII on macOS when this test
+        # was written. Standard output is UTF-8, for the note.
+        env = dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0", PYTHONIOENCODING="utf-8")
+        encoding = subprocess.run(
+            [sys.executable, "-c", "import locale; print(locale.getpreferredencoding(False))"],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if codecs.lookup(encoding).name == "utf-8":
+            self.skipTest(f"the locale's encoding is {encoding} under LC_ALL=C here")
+        member, value = NON_ASCII_FIELDS[0]
+        text = json.dumps(self.fixture(member, value, True), indent=2, ensure_ascii=False) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "fixture.json"
+            path.write_text(text, encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, str(Path(verify.__file__).resolve()), str(path)],
+                env=env, capture_output=True, encoding="utf-8",
+            )
+        line = f"signature: ed25519=true (verified against agentDid {value} bound key)"
+        self.assertEqual(run.stdout, pass_block(path, "", line))
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
 
 
 class RepeatedChallengeResponseMemberTest(unittest.TestCase):

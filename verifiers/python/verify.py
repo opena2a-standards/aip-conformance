@@ -47,6 +47,10 @@ VERBATIM:
 
     challenge | agentDid | nonce | issuedAt | expiresAt
 
+The signed bytes are that string encoded as UTF-8, as the Go verifier
+encodes it, and a fixture file is read as UTF-8, not in the locale's
+encoding, as the Go verifier reads it.
+
 A timestamp is read as a date-time in the RFC 3339 form _RFC3339_DATE_TIME
 matches, the form the Go verifier reads: issuedAt and expiresAt go into the
 payload as that time in UTC, written YYYY-MM-DDThh:mm:ssZ (_emit_rfc3339),
@@ -73,13 +77,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 # ---------------------------------------------------------------------------
 
 def canonical_challenge_response_payload(cb: dict) -> bytes:
+    """The bytes the signature covers: the five fields of the challenge body
+    cb joined by "|" and encoded as UTF-8, as the Go verifier encodes them,
+    so a field holding a character outside ASCII goes in as its UTF-8
+    bytes."""
     return "{}|{}|{}|{}|{}".format(
         cb["challenge"],
         cb["agentDid"],
         cb["nonce"],
         _normalize_rfc3339(cb["issuedAt"]),
         _normalize_rfc3339(cb["expiresAt"]),
-    ).encode("ascii")
+    ).encode("utf-8")
 
 
 def _normalize_rfc3339(s: str) -> str:
@@ -525,7 +533,8 @@ def _member_path(label: str, keys: List[Any]) -> str:
 
 
 def load_fixture(path: Path) -> dict:
-    """Reads a fixture file. A JSON object outside the two §5.1 bodies that
+    """Reads a fixture file as UTF-8, as the Go verifier reads it, not in
+    the locale's encoding. A JSON object outside the two §5.1 bodies that
     writes one member name twice raises ValueError naming the member: the
     verifier state, expected outcome or body it carries has no single
     reading, and json.loads would keep the later copy alone where the Go
@@ -533,7 +542,7 @@ def load_fixture(path: Path) -> dict:
     read under their exact names, as the Go verifier reads them outside the
     two bodies. A file whose top-level value is not a JSON object raises
     ValueError naming the value's JSON type."""
-    f = json.loads(path.read_text(), object_pairs_hook=_JSONObject.from_pairs)
+    f = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_JSONObject.from_pairs)
     repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
     if repeated is not None:
         raise ValueError(f"{repeated}: duplicate member name")
