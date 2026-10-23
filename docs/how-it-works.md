@@ -19,6 +19,17 @@ ATP 7-field precedent:
 challenge | agentDid | nonce | issuedAt | expiresAt
 ```
 
+Both reference verifiers read `issuedAt` and `expiresAt` as RFC 3339
+date-times of the form `YYYY-MM-DDThh:mm:ss`, an optional `.fraction`,
+then `Z`, `+hh:mm` or `-hh:mm`, with `T` and `Z` in upper case and each
+field in range. Such a value enters the payload as the same time in UTC,
+written `YYYY-MM-DDThh:mm:ssZ` without its fraction (an offset can move
+year 0 to year -1, written `-0001`, and year 9999 to year 10000, written
+`10000`); any other value enters as written. They read
+`verifierState.clockRfc3339` the same way, and when the expiry check
+reaches a clock that is missing, null, or a string not of that form, the
+fixture fails with a fixture error naming the member instead of a verdict.
+
 Fields in the response body that are NOT covered by the signature include
 `publicKey`, `keyId`, `signedAt`, `algorithm`. A consequence is that an
 attacker who can write to a stored response could rewrite `signedAt`
@@ -95,7 +106,8 @@ runs the gates below on pull requests and on pushes to `main`; the
    fixture's `challengeResponse.challenge` / `.response` must validate against
    the AIP-SPEC machine-readable schemas, vendored under
    `schemas/vendor/agent-identity-protocol/` and byte-drift-gated against a
-   pinned agent-identity-protocol ref.
+   pinned agent-identity-protocol ref. A member whose schema names the
+   `date-time` format must hold an RFC 3339 date-time.
 
 ## Expected output
 
@@ -143,5 +155,5 @@ scripts/parity/                  Go/Python verifier parity gate
 scripts/conformance_profile.py   writes conformance.json; --check gates drift
 scripts/schema_validation.py     validates fixture transcripts against schemas/
 scripts/docs_check.py            checks docs fixture counts and this layout
-tests/                           tests for scripts/conformance_profile.py (unittest)
+tests/                           tests for scripts/conformance_profile.py and scripts/schema_validation.py (unittest)
 ```

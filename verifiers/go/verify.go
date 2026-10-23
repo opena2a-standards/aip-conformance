@@ -27,15 +27,33 @@
 //	FAIL  <path>
 //	       fixture error: verifierState.agentBindings[0].publicKeyHex: missing
 //
-// The checks read that entry only after the signature check passes. The
+// So does a verifierState.clockRfc3339 that is missing, null, or a string
+// parseRFC3339 does not read, as in
+//
+//	fixture error: verifierState.clockRfc3339: cannot be read as a date-time ("2026-05-28T00:00:00" has no UTC offset)
+//
+// The checks read verifierState only after the signature check passes. The
 // fixture counts as a fail, and the run goes on to the next fixture and
 // prints the summary line.
+//
+// A fixture of any fixtureType whose verifierState is an object holding an
+// agentBindings or seenNonces that is not an array or null prints that FAIL
+// block before any check runs, with the line the Python verifier prints for
+// it:
+//
+//	FAIL  <path>
+//	       fixture error: verifierState.seenNonces: a number, not an array
 //
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 // VERBATIM:
 //
 //	challenge | agentDid | nonce | issuedAt | expiresAt
+//
+// A timestamp is read as a date-time in the RFC 3339 form rfc3339DateTime
+// matches, the form the Python verifier reads: issuedAt and expiresAt go
+// into the payload as that time in UTC, written YYYY-MM-DDThh:mm:ssZ
+// (normalizeRFC3339), and a value not in that form goes in as written.
 package main
 
 import (
@@ -44,6 +62,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -51,8 +70,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +99,11 @@ type VerifierState struct {
 	TrustedIssuers []string       `json:"trustedIssuers"`
 	AgentBindings  []AgentBinding `json:"agentBindings"`
 	SeenNonces     []string       `json:"seenNonces"`
+	// clockRFC3339Problem is "missing" when the verifierState object writes
+	// no clockRfc3339 member and "null, not a string" when it writes null
+	// there, both of which encoding/json decodes as the empty string.
+	// parseFixture sets it.
+	clockRFC3339Problem string
 }
 
 type ExpectedOutcome struct {
@@ -170,8 +196,11 @@ var protocolMessagesType = reflect.TypeOf(ChallengeResponse{})
 // the later copy omits, where the Python verifier reads the later copy
 // alone. Outside challengeResponse each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
-// reports for it. An agentBindings entry that writes no publicKeyHex, or a
-// null one, is marked for the checks (markPublicKeyHexProblems).
+// reports for it. A verifierState agentBindings or seenNonces that is not an
+// array or null is a *memberError (verifierStateArrays). An agentBindings
+// entry that writes no publicKeyHex, or a null one, is marked for the checks
+// (markPublicKeyHexProblems), and so is a verifierState that writes no
+// clockRfc3339, or a null one (markClockProblem).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -179,12 +208,94 @@ func parseFixture(b []byte) (Fixture, error) {
 			return f, fmt.Errorf("%s: duplicate member name", member)
 		}
 		b = exactMembers(b, reflect.TypeOf(f))
+		if err := checkVerifierStateArrays(b); err != nil {
+			return f, err
+		}
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
 		return f, err
 	}
 	markPublicKeyHexProblems(b, f.VerifierState.AgentBindings)
+	markClockProblem(b, &f.VerifierState)
 	return f, nil
+}
+
+// memberError is a fixture member that holds a value the verifier cannot
+// use. runFixture prints it as a fixture error, the line the Python
+// verifier's FixtureError prints for the same member.
+type memberError struct {
+	member, problem string
+}
+
+func (e *memberError) Error() string { return e.member + ": " + e.problem }
+
+// verifierStateArrays names the verifierState members that hold an array, in
+// the order checkVerifierStateArrays checks them. The Python verifier's
+// _VERIFIER_STATE_ARRAYS holds the same names in the same order.
+var verifierStateArrays = []string{"agentBindings", "seenNonces"}
+
+// checkVerifierStateArrays returns a *memberError naming the first
+// verifierStateArrays member of the verifierState object in raw that holds a
+// value that is not an array or null, such as 0, false, "" or {}, which
+// encoding/json fails to decode into a slice. It returns nil when there is
+// none, or when verifierState is not an object, which the decode reports.
+func checkVerifierStateArrays(raw []byte) error {
+	var doc struct {
+		VerifierState map[string]json.RawMessage `json:"verifierState"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	for _, name := range verifierStateArrays {
+		value, ok := doc.VerifierState[name]
+		if !ok {
+			continue
+		}
+		if kind := jsonType(value); kind != "an array" && kind != "null" {
+			return &memberError{"verifierState." + name, kind + ", not an array"}
+		}
+	}
+	return nil
+}
+
+// jsonType names the JSON type of the valid JSON value raw as the Python
+// verifier's _json_type names it.
+func jsonType(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "a number"
+	}
+	switch trimmed[0] {
+	case 'n':
+		return "null"
+	case 't', 'f':
+		return "a boolean"
+	case '"':
+		return "a string"
+	case '[':
+		return "an array"
+	case '{':
+		return "an object"
+	}
+	return "a number"
+}
+
+// markClockProblem sets clockRFC3339Problem on vs, the verifierState decoded
+// from raw without error, when raw writes verifierState as an object that
+// leaves out its clockRfc3339 member or writes it as null. The Python
+// verifier's FixtureError names the same two problems.
+func markClockProblem(raw []byte, vs *VerifierState) {
+	var written struct {
+		VerifierState map[string]json.RawMessage `json:"verifierState"`
+	}
+	if json.Unmarshal(raw, &written) != nil || written.VerifierState == nil {
+		return
+	}
+	if value, ok := written.VerifierState["clockRfc3339"]; !ok {
+		vs.clockRFC3339Problem = "missing"
+	} else if string(value) == "null" {
+		vs.clockRFC3339Problem = "null, not a string"
+	}
 }
 
 // markPublicKeyHexProblems sets publicKeyHexProblem on each entry of
@@ -226,40 +337,102 @@ func repeatedMember(label string, raw []byte, skip map[string]bool) (string, boo
 	// Without UseNumber, Token stops with an error at a number such as 1e400
 	// that does not fit a float64, and a repeat after it would go unseen.
 	dec.UseNumber()
-	member, found, _ := walkMembers(dec, label, skip)
+	w := memberWalk{dec: dec, skip: skip, label: label}
+	for path := range skip {
+		w.longest = max(w.longest, len(path))
+	}
+	member, found, _ := w.walk(w.cut(label))
 	return member, found
 }
 
-// walkMembers reads the next JSON value from dec for repeatedMember and
-// returns the first repeated member in it, and whether there is one.
-func walkMembers(dec *json.Decoder, label string, skip map[string]bool) (string, bool, error) {
-	tok, err := dec.Token()
+// memberWalk is the state of one repeatedMember walk. A path grows with its
+// nesting depth, so the walk keeps the path of the value it reads as the
+// label and one segment for each array or object around that value, and
+// writes a whole path out only for the member it returns.
+type memberWalk struct {
+	dec      *json.Decoder
+	skip     map[string]bool
+	longest  int // the length of the longest path in skip
+	label    string
+	segments []pathSegment
+}
+
+// pathSegment is the member name or the array index of a value in the object
+// or array that holds it.
+type pathSegment struct {
+	name  string
+	index int // -1 for a member name
+}
+
+// appendTo appends to path, the path of the object or array that holds s,
+// what s adds to it: [index], or .name, or the bare name when path is empty.
+func (s pathSegment) appendTo(path []byte) []byte {
+	switch {
+	case s.index >= 0:
+		path = append(path, '[')
+		path = strconv.AppendInt(path, int64(s.index), 10)
+		return append(path, ']')
+	case len(path) > 0:
+		path = append(path, '.')
+	}
+	return append(path, s.name...)
+}
+
+// path returns the path of the member at last in the object the walk is
+// reading.
+func (w *memberWalk) path(last pathSegment) string {
+	b := []byte(w.label)
+	for _, s := range w.segments {
+		b = s.appendTo(b)
+	}
+	return string(last.appendTo(b))
+}
+
+// cut returns path cut to one byte more than the longest path in skip, which
+// is enough to tell whether path is empty and whether skip holds it.
+func (w *memberWalk) cut(path string) string {
+	if len(path) > w.longest+1 {
+		return path[:w.longest+1]
+	}
+	return path
+}
+
+// headAt returns the cut path of the value at s in the object or array whose
+// cut path is head.
+func (w *memberWalk) headAt(head string, s pathSegment) string {
+	if len(head) > w.longest {
+		return head
+	}
+	return w.cut(string(s.appendTo([]byte(head))))
+}
+
+// walk reads the next JSON value from dec and returns the first repeated
+// member in it, and whether there is one. head is the value's cut path.
+func (w *memberWalk) walk(head string) (string, bool, error) {
+	tok, err := w.dec.Token()
 	if err != nil {
 		return "", false, err
 	}
 	switch tok {
 	case json.Delim('{'):
 		seen := map[string]bool{}
-		for dec.More() {
-			if tok, err = dec.Token(); err != nil {
+		for w.dec.More() {
+			if tok, err = w.dec.Token(); err != nil {
 				return "", false, err
 			}
 			name, _ := tok.(string)
-			path := name
-			if label != "" {
-				path = label + "." + name
-			}
+			s := pathSegment{name: name, index: -1}
 			if seen[name] {
-				return path, true, nil
+				return w.path(s), true, nil
 			}
 			seen[name] = true
-			if skip[path] {
+			if memberHead := w.headAt(head, s); w.skip[memberHead] {
 				var value json.RawMessage
-				err = dec.Decode(&value)
+				err = w.dec.Decode(&value)
 			} else {
 				var member string
 				var found bool
-				if member, found, err = walkMembers(dec, path, skip); found {
+				if member, found, err = w.walkAt(memberHead, s); found {
 					return member, true, nil
 				}
 			}
@@ -268,16 +441,25 @@ func walkMembers(dec *json.Decoder, label string, skip map[string]bool) (string,
 			}
 		}
 	case json.Delim('['):
-		for i := 0; dec.More(); i++ {
-			if member, found, err := walkMembers(dec, fmt.Sprintf("%s[%d]", label, i), skip); found || err != nil {
+		for i := 0; w.dec.More(); i++ {
+			s := pathSegment{index: i}
+			if member, found, err := w.walkAt(w.headAt(head, s), s); found || err != nil {
 				return member, found, err
 			}
 		}
 	default:
 		return "", false, nil
 	}
-	_, err = dec.Token() // the closing } or ]
+	_, err = w.dec.Token() // the closing } or ]
 	return "", false, err
+}
+
+// walkAt walks the value at s, whose cut path is head.
+func (w *memberWalk) walkAt(head string, s pathSegment) (string, bool, error) {
+	w.segments = append(w.segments, s)
+	member, found, err := w.walk(head)
+	w.segments = w.segments[:len(w.segments)-1]
+	return member, found, err
 }
 
 // exactMembers returns raw with each member of an object that decodes into a
@@ -511,12 +693,81 @@ func canonicalChallengeResponsePayload(cb ChallengeBody) []byte {
 	))
 }
 
+// normalizeRFC3339 is s as parseRFC3339 reads it, in UTC and written
+// YYYY-MM-DDThh:mm:ssZ without its fraction of a second, or s as written
+// when parseRFC3339 does not read it. time.RFC3339 writes year -1, which an
+// offset can make of year 0, as -0001, and year 10000 as 10000.
 func normalizeRFC3339(s string) string {
-	t, err := time.Parse(time.RFC3339, s)
+	t, err := parseRFC3339(s)
 	if err != nil {
 		return s
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// rfc3339DateTime matches the RFC 3339 date-time form both verifiers read;
+// the Python verifier's _RFC3339_DATE_TIME holds the same pattern. A
+// four-digit year and two-digit month, day, hour, minute and second, an
+// optional fraction of a second after a period, and Z or a UTC offset of
+// the form +hh:mm or -hh:mm, with T and Z in upper case. time.Parse with
+// the time.RFC3339 layout also reads forms outside RFC 3339, such as a
+// one-digit hour, a comma before the fraction and an offset of +24:00
+// (go.dev/issue/54580).
+var rfc3339DateTime = regexp.MustCompile(`^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})` +
+	`(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$`)
+
+// noUTCOffset matches a date alone, or a date and time with no UTC offset
+// (the Python verifier's _NO_UTC_OFFSET).
+var noUTCOffset = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)?$`)
+
+// parseRFC3339 reads s as a time, or returns an error when s is not an RFC
+// 3339 date-time in the form rfc3339DateTime matches. The month, day (by
+// the month and year), hour, minute, second and offset must be in range,
+// which leaves out a second of 60, an hour of 24 and an offset hour of 24.
+// The fraction is cut to nanoseconds. The Python verifier's _parse_rfc3339
+// reads the same values as the same times, with the same messages, Python
+// quoting the value as repr does.
+func parseRFC3339(s string) (time.Time, error) {
+	m := rfc3339DateTime.FindStringSubmatch(s)
+	if m == nil {
+		if noUTCOffset.MatchString(s) {
+			return time.Time{}, fmt.Errorf("%q has no UTC offset", s)
+		}
+		return time.Time{}, fmt.Errorf("%q is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm", s)
+	}
+	// Each group read here is digits, or empty (0) for the offset of Z.
+	num := func(group string) int {
+		v, _ := strconv.Atoi(group)
+		return v
+	}
+	year, month, day := num(m[1]), num(m[2]), num(m[3])
+	hour, minute, second := num(m[4]), num(m[5]), num(m[6])
+	offsetHour, offsetMinute := num(m[9]), num(m[10])
+	// Day 0 of the next month is the last day of this one. For a month out
+	// of range the month check below fails first.
+	daysInMonth := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	for _, f := range []struct {
+		name             string
+		value, low, high int
+	}{
+		{"month", month, 1, 12},
+		{"day", day, 1, daysInMonth},
+		{"hour", hour, 0, 23},
+		{"minute", minute, 0, 59},
+		{"second", second, 0, 59},
+		{"UTC offset hour", offsetHour, 0, 23},
+		{"UTC offset minute", offsetMinute, 0, 59},
+	} {
+		if f.value < f.low || f.value > f.high {
+			return time.Time{}, fmt.Errorf("the %s of %q is out of range", f.name, s)
+		}
+	}
+	nsec := num((m[7] + "000000000")[:9])
+	offset := time.Duration(offsetHour*60+offsetMinute) * time.Minute
+	if m[8] == "-" {
+		offset = -offset
+	}
+	return time.Date(year, time.Month(month), day, hour, minute, second, nsec, time.UTC).Add(-offset), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -539,8 +790,10 @@ type result struct {
 //  4. Nonce not in verifierState.seenNonces
 //
 // The first failing check wins; subsequent checks are not performed. When the
-// agentBindings entry check 2 reads has no publicKeyHex, or a null one, the
-// result is a fixtureError naming that member instead of a verdict.
+// agentBindings entry check 2 reads has no publicKeyHex, or a null one, or
+// the verifierState.clockRfc3339 check 3 reads is missing, null or a string
+// parseRFC3339 does not read, the result is a fixtureError naming that
+// member instead of a verdict.
 func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	// (1) Signature verification
 	pubBytes, err := base64.RawStdEncoding.DecodeString(cr.Response.PublicKey)
@@ -590,15 +843,14 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	}
 
 	// (3) Challenge not expired
-	clock, err := time.Parse(time.RFC3339, vs.ClockRFC3339)
-	if err != nil {
-		return result{
-			verdict:        "REJECT",
-			rejectCategory: "SIGNATURE_INVALID",
-			reason:         fmt.Sprintf("verifierState.clockRfc3339 is not RFC 3339: %v", err),
-		}
+	if vs.clockRFC3339Problem != "" {
+		return result{fixtureError: "verifierState.clockRfc3339: " + vs.clockRFC3339Problem}
 	}
-	expiresAt, err := time.Parse(time.RFC3339, cr.Challenge.ExpiresAt)
+	clock, err := parseRFC3339(vs.ClockRFC3339)
+	if err != nil {
+		return result{fixtureError: fmt.Sprintf("verifierState.clockRfc3339: cannot be read as a date-time (%v)", err)}
+	}
+	expiresAt, err := parseRFC3339(cr.Challenge.ExpiresAt)
 	if err != nil {
 		return result{
 			verdict:        "REJECT",
@@ -768,6 +1020,11 @@ func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) boo
 		return false
 	}
 	f, err := parseFixture(b)
+	var unusable *memberError
+	if errors.As(err, &unusable) {
+		fmt.Fprintf(w, "FAIL  %s\n       fixture error: %v\n", path, unusable)
+		return false
+	}
 	if err != nil {
 		fmt.Fprintf(w, "FAIL  %s\n       parse error: %v\n", path, err)
 		return false
