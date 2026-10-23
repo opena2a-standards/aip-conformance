@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -326,6 +327,137 @@ func TestRepeatedWrapperMemberIsALoadError(t *testing.T) {
 			want := "PASS  " + path + "\n       expected: REJECT [NONCE_REPLAY]\n       observed: REJECT[NONCE_REPLAY: response.nonce was already seen by the verifier]\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
 			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
 				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit 0, stdout:\n%s", code, &stdout, &stderr, want)
+			}
+		})
+	}
+}
+
+// TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn: when the
+// agentBindings entry for response.agentDid has no publicKeyHex, a null one,
+// or a string shorter than 16 characters that is not the response key, the
+// fixture prints one FAIL block, and the run goes on to the next fixture and
+// prints the summary line. A missing or null publicKeyHex is a fixture error
+// naming the member; a short string is quoted whole in the REJECT
+// [UNTRUSTED_KEY] reason. The cases are built from the valid fixture, and
+// each runs before a copy of it, whose PASS block follows unchanged. The
+// checks do not read an entry for another agentDid, or any entry when the
+// signature does not verify, so those cases keep their verdicts.
+// ../python/verify.py prints the same lines for copies edited the same way.
+func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	bindings := memberText(t, doc, "agentBindings")
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(bindings, `"agentBindings": `)), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the valid fixture writes %d agentBindings entries, want 1", len(entries))
+	}
+	agent, _ := entries[0]["agentDid"].(string)
+	// The valid fixture binds the response key, so the reason's "got" prefix
+	// is the bound key's.
+	key, _ := entries[0]["publicKeyHex"].(string)
+	if len(key) < 16 {
+		t.Fatalf("the valid fixture's bound key %q is shorter than 16 characters", key)
+	}
+
+	// withBindings returns doc with agentBindings holding the entries edit
+	// returns, given a copy of the bound entry and a copy for another agentDid.
+	withBindings := func(edit func(bound, other map[string]any) []map[string]any) string {
+		t.Helper()
+		other := maps.Clone(entries[0])
+		other["agentDid"] = "did:opena2a:agent:not_bound"
+		edited, err := json.Marshal(edit(maps.Clone(entries[0]), other))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Replace(doc, bindings, `"agentBindings": `+string(edited), 1)
+	}
+	withKey := func(value any) string {
+		return withBindings(func(bound, _ map[string]any) []map[string]any {
+			bound["publicKeyHex"] = value
+			return []map[string]any{bound}
+		})
+	}
+	withoutKey := func(bound, _ map[string]any) []map[string]any {
+		delete(bound, "publicKeyHex")
+		return []map[string]any{bound}
+	}
+	replaced := func(text, from, to string) string {
+		t.Helper()
+		if !strings.Contains(text, from) {
+			t.Fatalf("the fixture does not write %s", from)
+		}
+		return strings.Replace(text, from, to, 1)
+	}
+	// The challenge comes before the response in the fixture, so the first
+	// issuedAt is the signed one.
+	badSignature := replaced(replaced(withBindings(withoutKey),
+		`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`),
+		`"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`)
+	mismatch := func(quoted string) string {
+		return "       expected: ACCEPT\n" +
+			"       observed: REJECT[UNTRUSTED_KEY: response.publicKey does not match bound key for agentDid " + agent +
+			" (got " + key[:16] + "..., bound is " + quoted + "...)]\n"
+	}
+
+	dir := t.TempDir()
+	write := func(t *testing.T, name, text string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// valid.json sorts after fixture.json, so each case runs before it.
+	valid := write(t, "valid.json", doc)
+	var stdout, stderr bytes.Buffer
+	alone := "\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+	if code := run([]string{valid}, &stdout, &stderr); code != 0 || !strings.HasPrefix(stdout.String(), "PASS  "+valid+"\n") || !strings.HasSuffix(stdout.String(), alone) {
+		t.Fatalf("the valid copy alone: exit %d, stdout:\n%s\nstderr:\n%s", code, &stdout, &stderr)
+	}
+	validBlock := strings.TrimSuffix(stdout.String(), alone)
+
+	cases := []struct {
+		name, doc string
+		keeps     bool   // the case keeps its verdict and passes
+		lines     string // the case's block after its PASS or FAIL line
+	}{
+		{"the bound entry with no publicKeyHex", withBindings(withoutKey), false,
+			"       fixture error: verifierState.agentBindings[0].publicKeyHex: missing\n"},
+		{"the bound entry's publicKeyHex null", withKey(nil), false,
+			"       fixture error: verifierState.agentBindings[0].publicKeyHex: null, not a string\n"},
+		{"the bound entry second, with no publicKeyHex", withBindings(func(bound, other map[string]any) []map[string]any {
+			delete(bound, "publicKeyHex")
+			return []map[string]any{other, bound}
+		}), false, "       fixture error: verifierState.agentBindings[1].publicKeyHex: missing\n"},
+		{"the bound entry's publicKeyHex abc", withKey("abc"), false, mismatch("abc")},
+		{"the bound entry's publicKeyHex empty", withKey(""), false, mismatch("")},
+		{"an entry for another agentDid with no publicKeyHex", withBindings(func(bound, other map[string]any) []map[string]any {
+			delete(other, "publicKeyHex")
+			return []map[string]any{other, bound}
+		}), true, strings.TrimPrefix(validBlock, "PASS  "+valid+"\n")},
+		{"a signature that does not verify, with no publicKeyHex", badSignature, true,
+			"       expected: REJECT [SIGNATURE_INVALID]\n" +
+				"       observed: REJECT[SIGNATURE_INVALID: Ed25519 signature did not verify against the canonical 5-field payload]\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := write(t, "fixture.json", tc.doc)
+			gate, summary, wantCode := "FAIL", "summary: 1 pass, 1 fail (2 fixtures)", 1
+			if tc.keeps {
+				gate, summary, wantCode = "PASS", "summary: 2 pass, 0 fail (2 fixtures)", 0
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{path, valid}, &stdout, &stderr)
+			want := gate + "  " + path + "\n" + tc.lines + validBlock + "\n" + summary + "\n"
+			if code != wantCode || stdout.String() != want || stderr.Len() != 0 {
+				t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s\nwant exit %d, stdout:\n%s", code, &stdout, &stderr, wantCode, want)
 			}
 		})
 	}

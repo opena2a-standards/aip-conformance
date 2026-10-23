@@ -20,6 +20,17 @@
 // member name twice in the same JSON object fails to load on both verifiers,
 // which counts as a fail (exit code 1).
 //
+// A challengeResponse fixture whose agentBindings entry for response.agentDid
+// has no publicKeyHex member, or a null one, prints a FAIL block naming the
+// member, in the form the Python verifier uses for a fixture error:
+//
+//	FAIL  <path>
+//	       fixture error: verifierState.agentBindings[0].publicKeyHex: missing
+//
+// The checks read that entry only after the signature check passes. The
+// fixture counts as a fail, and the run goes on to the next fixture and
+// prints the summary line.
+//
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 // VERBATIM:
@@ -56,6 +67,10 @@ type AgentBinding struct {
 	AgentDID     string `json:"agentDid"`
 	Algorithm    string `json:"algorithm"`
 	PublicKeyHex string `json:"publicKeyHex"`
+	// publicKeyHexProblem is "missing" when the entry writes no publicKeyHex
+	// member and "null, not a string" when it writes null there, both of
+	// which encoding/json decodes as the empty string. parseFixture sets it.
+	publicKeyHexProblem string
 }
 
 type VerifierState struct {
@@ -155,7 +170,8 @@ var protocolMessagesType = reflect.TypeOf(ChallengeResponse{})
 // the later copy omits, where the Python verifier reads the later copy
 // alone. Outside challengeResponse each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
-// reports for it.
+// reports for it. An agentBindings entry that writes no publicKeyHex, or a
+// null one, is marked for the checks (markPublicKeyHexProblems).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -164,8 +180,36 @@ func parseFixture(b []byte) (Fixture, error) {
 		}
 		b = exactMembers(b, reflect.TypeOf(f))
 	}
-	err := json.Unmarshal(b, &f)
-	return f, err
+	if err := json.Unmarshal(b, &f); err != nil {
+		return f, err
+	}
+	markPublicKeyHexProblems(b, f.VerifierState.AgentBindings)
+	return f, nil
+}
+
+// markPublicKeyHexProblems sets publicKeyHexProblem on each entry of
+// bindings, the verifierState.agentBindings decoded from raw without error,
+// whose publicKeyHex member raw leaves out or writes as null. The Python
+// verifier's FixtureError names the same two problems.
+func markPublicKeyHexProblems(raw []byte, bindings []AgentBinding) {
+	var written struct {
+		VerifierState struct {
+			AgentBindings []map[string]json.RawMessage `json:"agentBindings"`
+		} `json:"verifierState"`
+	}
+	if json.Unmarshal(raw, &written) != nil {
+		return
+	}
+	for i, entry := range written.VerifierState.AgentBindings {
+		if i == len(bindings) {
+			break
+		}
+		if value, ok := entry["publicKeyHex"]; !ok {
+			bindings[i].publicKeyHexProblem = "missing"
+		} else if string(value) == "null" {
+			bindings[i].publicKeyHexProblem = "null, not a string"
+		}
+	}
 }
 
 // repeatedMember returns the first member name, in document order, that a
@@ -484,6 +528,7 @@ type result struct {
 	rejectCategory string // populated on REJECT
 	reason         string
 	signaturesNote string // diagnostic line shown in PASS/FAIL output
+	fixtureError   string // set in place of a verdict: "<member>: <problem>"
 }
 
 // verifyChallengeResponse applies the AIP §5.1 step-5 checks in order:
@@ -493,7 +538,9 @@ type result struct {
 //  3. Challenge not expired (verifier clock < expiresAt)
 //  4. Nonce not in verifierState.seenNonces
 //
-// The first failing check wins; subsequent checks are not performed.
+// The first failing check wins; subsequent checks are not performed. When the
+// agentBindings entry check 2 reads has no publicKeyHex, or a null one, the
+// result is a fixtureError naming that member instead of a verdict.
 func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	// (1) Signature verification
 	pubBytes, err := base64.RawStdEncoding.DecodeString(cr.Response.PublicKey)
@@ -522,7 +569,7 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	}
 
 	// (2) publicKey matches bound key for response.agentDid
-	bound, found := lookupAgentBinding(vs, cr.Response.AgentDID)
+	bound, entry, found := lookupAgentBinding(vs, cr.Response.AgentDID)
 	if !found {
 		return result{
 			verdict:        "REJECT",
@@ -530,12 +577,15 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 			reason:         fmt.Sprintf("response.agentDid %s has no agentBinding in verifierState", cr.Response.AgentDID),
 		}
 	}
+	if bound.publicKeyHexProblem != "" {
+		return result{fixtureError: entry + ".publicKeyHex: " + bound.publicKeyHexProblem}
+	}
 	boundPubHex := hex.EncodeToString(pubBytes)
 	if boundPubHex != bound.PublicKeyHex {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
-			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", cr.Response.AgentDID, boundPubHex[:16], bound.PublicKeyHex[:16]),
+			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", cr.Response.AgentDID, quotedKey(boundPubHex), quotedKey(bound.PublicKeyHex)),
 		}
 	}
 
@@ -581,13 +631,26 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	}
 }
 
-func lookupAgentBinding(vs VerifierState, agentDID string) (AgentBinding, bool) {
-	for _, b := range vs.AgentBindings {
+// quotedKey is the part of a key the UNTRUSTED_KEY reason quotes: its first
+// 16 bytes, or the whole key when it is shorter, such as a bound publicKeyHex
+// of "abc" or "".
+func quotedKey(key string) string {
+	if len(key) > 16 {
+		return key[:16]
+	}
+	return key
+}
+
+// lookupAgentBinding returns the first verifierState.agentBindings entry whose
+// agentDid is agentDID, and the member name of that entry, as in
+// verifierState.agentBindings[0].
+func lookupAgentBinding(vs VerifierState, agentDID string) (AgentBinding, string, bool) {
+	for i, b := range vs.AgentBindings {
 		if b.AgentDID == agentDID {
-			return b, true
+			return b, fmt.Sprintf("verifierState.agentBindings[%d]", i), true
 		}
 	}
-	return AgentBinding{}, false
+	return AgentBinding{}, "", false
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +786,10 @@ func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) boo
 	}
 
 	r := verifyChallengeResponse(f.ChallengeResponse, f.VerifierState)
+	if r.fixtureError != "" {
+		fmt.Fprintf(w, "FAIL  %s\n       fixture error: %s\n", path, r.fixtureError)
+		return false
+	}
 	expected := f.Expected.VerifyResult
 	observedDetail := r.verdict
 	if r.verdict == "REJECT" {

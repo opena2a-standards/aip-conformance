@@ -1,9 +1,10 @@
 """Regression tests for verify.py: a fixture that writes one member name
 twice in a JSON object outside challengeResponse fails to load, a member
-spelled in another case is not read as the fixture member, and a fixture
+spelled in another case is not read as the fixture member, a fixture
 whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
-next fixture.
+next fixture, and a timestamp with no UTC offset is not read in the
+machine's local time zone.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -11,20 +12,31 @@ Run from this directory:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import verify
 
 FIXTURES = Path(__file__).resolve().parent.parent.parent / "fixtures"
 REPLAY = FIXTURES / "challenge-response-replay.json"
 VALID = FIXTURES / "challenge-response-valid.json"
+AGENT_BOUND_KEY = FIXTURES.parent / "vectors" / "agent-bound-key.json"
+
+# The local time zones the time-zone tests run under, each with its UTC
+# offset in hours on 2026-05-28: UTC, a zone behind it and a zone ahead of it.
+TIME_ZONES = (("UTC", 0), ("America/Denver", -6), ("Asia/Tokyo", 9))
 
 
 def member_text(text: str, name: str) -> str:
@@ -69,6 +81,33 @@ def run_text(text: str) -> tuple[Path, int, str, str]:
         path = Path(d) / "fixture.json"
         path.write_text(text, encoding="utf-8")
         return (path, *run_main(path))
+
+
+@contextlib.contextmanager
+def local_time_zone(name: str) -> Iterator[None]:
+    """The process's local time zone set to the zone name inside the block,
+    as TZ=name sets it for a new process."""
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if saved is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+def sign_as_written(doc: dict) -> None:
+    """Signs the challenge in doc with the agent's bound key over the
+    canonical payload that holds issuedAt and expiresAt as written."""
+    seed = bytes.fromhex(json.loads(AGENT_BOUND_KEY.read_text(encoding="utf-8"))["seedHex"])
+    challenge = doc["challengeResponse"]["challenge"]
+    payload = "|".join(challenge[k] for k in ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt"))
+    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(payload.encode("ascii"))
+    doc["challengeResponse"]["response"]["signature"] = base64.b64encode(signature).decode("ascii").rstrip("=")
 
 
 class RepeatedWrapperMemberTest(unittest.TestCase):
@@ -309,6 +348,91 @@ class UnreadableFixtureTest(unittest.TestCase):
         )
         self.assertEqual(err, "")
         self.assertEqual(code, 0)
+
+
+@unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is not available on this platform")
+class NoUtcOffsetTest(unittest.TestCase):
+    """A date and time with no UTC offset, or a date alone, is not RFC 3339,
+    and a fixture holding one prints the same lines under each of
+    TIME_ZONES. As verifierState.clockRfc3339 it is a fixture error, as a
+    clockRfc3339 the verifier cannot read is. A challenge issuedAt or
+    expiresAt with no UTC offset, under the shipped signature, which is
+    over the same value with Z appended, is rejected as SIGNATURE_INVALID,
+    and an expiresAt the verifier does not read, under a signature made
+    over it as written, is rejected as CHALLENGE_EXPIRED: for each challenge
+    case, the verdict and category that ../go/verify.go gives the same
+    file. The cases are built from the valid fixture."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def assert_same_in_each_time_zone(self, text: str, gate: str, lines: str) -> None:
+        """A file holding text prints gate and the file's path, then lines,
+        then the summary line, under each of TIME_ZONES."""
+        passed = gate == "PASS"
+        summary = f"\nsummary: {int(passed)} pass, {int(not passed)} fail (1 fixtures)\n"
+        for zone, hours in TIME_ZONES:
+            with self.subTest(zone=zone), local_time_zone(zone):
+                self.assertEqual(datetime(2026, 5, 28).astimezone().utcoffset(), timedelta(hours=hours))
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, f"{gate}  {path}\n{lines}{summary}")
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0 if passed else 1)
+
+    def test_clock_with_no_utc_offset_is_a_fixture_error(self) -> None:
+        for clock in ("2026-05-28T00:00:00", "2026-05-28"):
+            with self.subTest(clock=clock):
+                self.assert_same_in_each_time_zone(
+                    edited(self.text, lambda d: d["verifierState"].update(clockRfc3339=clock)),
+                    "FAIL",
+                    "       fixture error: verifierState.clockRfc3339: "
+                    f"cannot be read as a date-time ({clock!r} has no UTC offset)\n",
+                )
+
+    def test_challenge_timestamp_the_verifier_does_not_read_gets_the_go_verdict(self) -> None:
+        with self.assertRaises(ValueError) as unread:
+            verify._parse_rfc3339("tomorrow")
+        bad_signature = "Ed25519 signature did not verify against the canonical 5-field payload"
+        # (member, value, signed as written, category, reason)
+        cases = [
+            ("expiresAt", "2026-05-28T00:03:00", False, "SIGNATURE_INVALID", bad_signature),
+            ("issuedAt", "2026-05-27T23:58:00", False, "SIGNATURE_INVALID", bad_signature),
+            (
+                "expiresAt",
+                "2026-05-28T00:03:00",
+                True,
+                "CHALLENGE_EXPIRED",
+                "challenge.expiresAt is not RFC 3339: '2026-05-28T00:03:00' has no UTC offset",
+            ),
+            (
+                "expiresAt",
+                "2026-05-28",
+                True,
+                "CHALLENGE_EXPIRED",
+                "challenge.expiresAt is not RFC 3339: '2026-05-28' has no UTC offset",
+            ),
+            (
+                "expiresAt",
+                "tomorrow",
+                True,
+                "CHALLENGE_EXPIRED",
+                f"challenge.expiresAt is not RFC 3339: {unread.exception}",
+            ),
+        ]
+        for member, value, signed, category, reason in cases:
+
+            def edit(d: dict) -> None:
+                d["challengeResponse"]["challenge"][member] = value
+                if signed:
+                    sign_as_written(d)
+                d["expected"] = {"verifyResult": "REJECT", "rejectCategory": category}
+
+            with self.subTest(member=member, value=value, signed=signed):
+                self.assert_same_in_each_time_zone(
+                    edited(self.text, edit),
+                    "PASS",
+                    f"       expected: REJECT [{category}]\n       observed: REJECT[{category}: {reason}]\n",
+                )
 
 
 if __name__ == "__main__":
