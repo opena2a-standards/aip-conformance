@@ -181,12 +181,13 @@ type Fixture struct {
 // ---------------------------------------------------------------------------
 
 // protocolMessages names the fixture members that hold the protocol messages
-// under test: the two §5.1 bodies inside challengeResponse. parseFixture
-// leaves their values to encoding/json as written: they are not walked for
-// repeated member names, and their members are not narrowed to their exact
-// names. challengeResponse itself is fixture format, read like the rest of
-// the fixture. The Python verifier's _PROTOCOL_MESSAGES holds the same names.
-var protocolMessages = map[string]bool{"challengeResponse.challenge": true, "challengeResponse.response": true}
+// under test: the two §5.1 bodies inside challengeResponse, each by the
+// member names on its path from the top-level object. parseFixture leaves
+// their values to encoding/json as written: they are not walked for repeated
+// member names, and their members are not narrowed to their exact names.
+// challengeResponse itself is fixture format, read like the rest of the
+// fixture. The Python verifier's _PROTOCOL_MESSAGES holds the same paths.
+var protocolMessages = [][]string{{"challengeResponse", "challenge"}, {"challengeResponse", "response"}}
 
 // protocolMessageTypes are the decode targets of the protocolMessages members.
 var protocolMessageTypes = map[reflect.Type]bool{
@@ -335,18 +336,18 @@ func markPublicKeyHexProblems(raw []byte, bindings []AgentBinding) {
 // Names are compared after JSON unescaping, in which encoding/json decodes
 // an unpaired surrogate escape such as \ud800 to U+FFFD (the Python
 // verifier's _UNPAIRED_SURROGATE), and never folded, so VerifierState does
-// not repeat verifierState. The value of a member whose path is in skip is
-// not walked. raw is valid JSON.
-func repeatedMember(label string, raw []byte, skip map[string]bool) (string, bool) {
+// not repeat verifierState. The value at a path in skip, the member names
+// that lead to it from the top-level value of raw, is not walked. A skip path
+// is compared name by name, not as the joined path, so a top-level member
+// named challengeResponse.challenge is walked. raw is valid JSON, and each
+// path in skip holds at least one name.
+func repeatedMember(label string, raw []byte, skip [][]string) (string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	// Without UseNumber, Token stops with an error at a number such as 1e400
 	// that does not fit a float64, and a repeat after it would go unseen.
 	dec.UseNumber()
-	w := memberWalk{dec: dec, skip: skip, label: label}
-	for path := range skip {
-		w.longest = max(w.longest, len(path))
-	}
-	member, found, _ := w.walk(w.cut(label))
+	w := memberWalk{dec: dec, label: label}
+	member, found, _ := w.walk(skip)
 	return member, found
 }
 
@@ -356,8 +357,6 @@ func repeatedMember(label string, raw []byte, skip map[string]bool) (string, boo
 // writes a whole path out only for the member it returns.
 type memberWalk struct {
 	dec      *json.Decoder
-	skip     map[string]bool
-	longest  int // the length of the longest path in skip
 	label    string
 	segments []pathSegment
 }
@@ -393,27 +392,27 @@ func (w *memberWalk) path(last pathSegment) string {
 	return string(last.appendTo(b))
 }
 
-// cut returns path cut to one byte more than the longest path in skip, which
-// is enough to tell whether path is empty and whether skip holds it.
-func (w *memberWalk) cut(path string) string {
-	if len(path) > w.longest+1 {
-		return path[:w.longest+1]
+// skipRest returns the rest of each path in skip that begins with the member
+// name, and whether one of them is that name alone, in which case the walk
+// does not read the member's value.
+func skipRest(skip [][]string, name string) ([][]string, bool) {
+	var rest [][]string
+	for _, path := range skip {
+		if path[0] != name {
+			continue
+		}
+		if len(path) == 1 {
+			return nil, true
+		}
+		rest = append(rest, path[1:])
 	}
-	return path
-}
-
-// headAt returns the cut path of the value at s in the object or array whose
-// cut path is head.
-func (w *memberWalk) headAt(head string, s pathSegment) string {
-	if len(head) > w.longest {
-		return head
-	}
-	return w.cut(string(s.appendTo([]byte(head))))
+	return rest, false
 }
 
 // walk reads the next JSON value from dec and returns the first repeated
-// member in it, and whether there is one. head is the value's cut path.
-func (w *memberWalk) walk(head string) (string, bool, error) {
+// member in it, and whether there is one. skip holds the rest of each skip
+// path that begins with the member names leading to the value.
+func (w *memberWalk) walk(skip [][]string) (string, bool, error) {
 	tok, err := w.dec.Token()
 	if err != nil {
 		return "", false, err
@@ -431,13 +430,13 @@ func (w *memberWalk) walk(head string) (string, bool, error) {
 				return w.path(s), true, nil
 			}
 			seen[name] = true
-			if memberHead := w.headAt(head, s); w.skip[memberHead] {
+			if rest, skipped := skipRest(skip, name); skipped {
 				var value json.RawMessage
 				err = w.dec.Decode(&value)
 			} else {
 				var member string
 				var found bool
-				if member, found, err = w.walkAt(memberHead, s); found {
+				if member, found, err = w.walkAt(rest, s); found {
 					return member, true, nil
 				}
 			}
@@ -446,9 +445,9 @@ func (w *memberWalk) walk(head string) (string, bool, error) {
 			}
 		}
 	case json.Delim('['):
+		// A skip path names members only, so it leads to no element.
 		for i := 0; w.dec.More(); i++ {
-			s := pathSegment{index: i}
-			if member, found, err := w.walkAt(w.headAt(head, s), s); found || err != nil {
+			if member, found, err := w.walkAt(nil, pathSegment{index: i}); found || err != nil {
 				return member, found, err
 			}
 		}
@@ -459,10 +458,11 @@ func (w *memberWalk) walk(head string) (string, bool, error) {
 	return "", false, err
 }
 
-// walkAt walks the value at s, whose cut path is head.
-func (w *memberWalk) walkAt(head string, s pathSegment) (string, bool, error) {
+// walkAt walks the value at s, with skip the rest of each skip path that
+// begins with the member names leading to it.
+func (w *memberWalk) walkAt(skip [][]string, s pathSegment) (string, bool, error) {
 	w.segments = append(w.segments, s)
-	member, found, err := w.walk(head)
+	member, found, err := w.walk(skip)
 	w.segments = w.segments[:len(w.segments)-1]
 	return member, found, err
 }

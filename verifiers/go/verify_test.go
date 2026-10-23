@@ -1092,9 +1092,13 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 // fixture format around the two §5.1 bodies, so a member it writes twice
 // fails the fixture to load with the line of the other repeated members, and
 // a member spelled in another case is not read as challenge or response. A
-// member repeated inside a body is not a load error. The cases are built from
-// the valid fixture. ../python/test_verify.py builds the same cases and
-// expects the same lines.
+// member repeated inside a body is not a load error. A body is the member
+// challenge or response of the top-level challengeResponse, so a repeat in a
+// top-level member named challengeResponse.challenge or
+// challengeResponse.response, or in challengeResponse.challenge under a
+// member with the empty name, is a load error. The cases are built from the
+// valid fixture. ../python/test_verify.py builds the same cases and expects
+// the same lines.
 func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
 	if err != nil {
@@ -1136,6 +1140,9 @@ func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 		{"response twice, both copies the same", withContainer(m("challenge", challenge), m("response", response), m("response", response)), "challengeResponse.response"},
 		{"challenge twice, the later copy with another nonce", withContainer(m("challenge", challenge), m("challenge", with(challenge, "nonce", probeBytes(3, 16))), m("response", response)), "challengeResponse.challenge"},
 		{"another member twice", withContainer(m("challenge", challenge), m("response", response), m("note", "1"), m("note", "2")), "challengeResponse.note"},
+		{"a top-level member named challengeResponse.challenge", appendMember(t, doc, `"challengeResponse.challenge": {"a": 1, "a": 2}`), "challengeResponse.challenge.a"},
+		{"a top-level member named challengeResponse.response", appendMember(t, doc, `"challengeResponse.response": {"a": 1, "a": 2}`), "challengeResponse.response.a"},
+		{"challengeResponse.challenge inside a member with the empty name", appendMember(t, doc, `"": {"challengeResponse": {"challenge": {"a": 1, "a": 2}}}`), "challengeResponse.challenge.a"},
 	}
 	for _, tc := range repeats {
 		t.Run(tc.name, func(t *testing.T) {

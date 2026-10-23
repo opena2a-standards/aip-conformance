@@ -933,6 +933,10 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
     member it writes twice fails the fixture to load with the line of the
     other repeated members, and a member spelled in another case is not read
     as challenge or response. A member repeated inside a body is not a load
+    error. A body is the member challenge or response of the top-level
+    challengeResponse, so a repeat in a top-level member named
+    challengeResponse.challenge or challengeResponse.response, or in
+    challengeResponse.challenge under a member with the empty name, is a load
     error. The cases are built from the valid fixture. ../go/verify_test.go
     builds the same cases and expects the same lines."""
 
@@ -975,6 +979,21 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                 "another member twice",
                 self.with_container(m("challenge", self.challenge), m("response", self.response), m("note", 1), m("note", 2)),
                 "challengeResponse.note",
+            ),
+            (
+                "a top-level member named challengeResponse.challenge",
+                append_member(self.text, '"challengeResponse.challenge": {"a": 1, "a": 2}'),
+                "challengeResponse.challenge.a",
+            ),
+            (
+                "a top-level member named challengeResponse.response",
+                append_member(self.text, '"challengeResponse.response": {"a": 1, "a": 2}'),
+                "challengeResponse.response.a",
+            ),
+            (
+                "challengeResponse.challenge inside a member with the empty name",
+                append_member(self.text, '"": {"challengeResponse": {"challenge": {"a": 1, "a": 2}}}'),
+                "challengeResponse.challenge.a",
             ),
         ]
         for name, text, member in repeats:

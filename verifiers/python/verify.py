@@ -406,11 +406,11 @@ def _emit_rfc3339(t: _Instant) -> str:
 # ---------------------------------------------------------------------------
 
 # The fixture members that hold the protocol messages under test: the two §5.1
-# bodies inside challengeResponse. Their values are not walked for repeated
-# member names; challengeResponse itself is fixture format, walked like the
-# rest of the fixture. The Go verifier's protocolMessages holds the same
-# names.
-_PROTOCOL_MESSAGES = frozenset({"challengeResponse.challenge", "challengeResponse.response"})
+# bodies inside challengeResponse, each by the member names on its path from
+# the top-level object. Their values are not walked for repeated member names;
+# challengeResponse itself is fixture format, walked like the rest of the
+# fixture. The Go verifier's protocolMessages holds the same paths.
+_PROTOCOL_MESSAGES = (("challengeResponse", "challenge"), ("challengeResponse", "response"))
 
 # The verifierState members that hold an array, in the order
 # _check_verifier_state_arrays checks them. The Go verifier's
@@ -438,36 +438,37 @@ class _JSONObject(dict):
         return obj
 
 
-def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> Optional[str]:
+def _repeated_member(label: str, value: Any, skip: Tuple[Tuple[str, ...], ...] = ()) -> Optional[str]:
     """The first member name, in document order, that a JSON object in value
     writes twice, or None when no object repeats a name. The member is named
     object.member and array[index], and a top-level member with an empty
     label by its bare name, as the Go verifier's repeatedMember names it.
     Names are compared as encoding/json unescapes them (_UNPAIRED_SURROGATE)
     and never folded, so VerifierState does not repeat verifierState. The
-    value of a member whose path is in skip is not walked."""
+    value at a path in skip, the member names that lead to it from value, is
+    not walked. A skip path is compared name by name, not as the joined path,
+    so a top-level member named challengeResponse.challenge is walked. Each
+    path in skip holds at least one name."""
     # An explicit stack rather than recursion, so a deeply nested document
     # cannot raise RecursionError here. Each entry walks one array or object:
     # an iterator over its (index or name, value) pairs, the member names seen
-    # so far (None for an array), its piece of the path (label for the first
-    # entry, then [index], .name, or the bare name after an empty path), and
-    # its path cut to one character more than the longest path in skip, which
-    # is enough to tell whether the path is empty and whether skip holds it.
-    # A path grows with its nesting depth, so the walk joins the pieces on the
-    # stack into a whole path only for the member it returns.
-    longest = max(map(len, skip), default=0)
-    stack: List[Tuple[Iterator[Tuple[Any, Any]], Optional[Set[str]], str, str]] = []
+    # so far (None for an array), its index or member name in the array or
+    # object that holds it (None for the first entry), and the rest of each
+    # skip path that begins with the member names leading to it. A path grows
+    # with its nesting depth, so the walk writes out a whole path only for the
+    # member it returns.
+    stack: List[Tuple[Iterator[Tuple[Any, Any]], Optional[Set[str]], Any, Tuple[Tuple[str, ...], ...]]] = []
 
-    def enter(item: Any, piece: str, head: str) -> None:
+    def enter(item: Any, key: Any, rest: Tuple[Tuple[str, ...], ...]) -> None:
         if isinstance(item, list):
-            stack.append((iter(enumerate(item)), None, piece, head))
+            stack.append((iter(enumerate(item)), None, key, rest))
         elif isinstance(item, dict):
             pairs = item.pairs if isinstance(item, _JSONObject) else item.items()
-            stack.append((iter(pairs), set(), piece, head))
+            stack.append((iter(pairs), set(), key, rest))
 
-    enter(value, label, label[: longest + 1])
+    enter(value, None, skip)
     while stack:
-        members, seen, _, head = stack[-1]
+        members, seen, _, rest = stack[-1]
         step = next(members, None)
         if step is None:
             stack.pop()
@@ -476,17 +477,31 @@ def _repeated_member(label: str, value: Any, skip: frozenset = frozenset()) -> O
         if seen is None:
             if not isinstance(item, (list, dict)):
                 continue  # an element that is not an array or object has no members
-            piece = f"[{key}]"
-        else:
-            name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
-            piece = f".{name}" if head else name
-            if name in seen:
-                return "".join(entry[2] for entry in stack) + piece
-            seen.add(name)
-        item_head = head if len(head) > longest else (head + piece)[: longest + 1]
-        if item_head not in skip:
-            enter(item, piece, item_head)
+            enter(item, key, ())  # a skip path names members only, so it leads to no element
+            continue
+        name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
+        if name in seen:
+            return _member_path(label, [entry[2] for entry in stack[1:]] + [name])
+        seen.add(name)
+        item_rest = tuple(path[1:] for path in rest if path[0] == name) if rest else ()
+        if () not in item_rest:
+            enter(item, name, item_rest)
     return None
+
+
+def _member_path(label: str, keys: List[Any]) -> str:
+    """label followed by each key: [index] for an array index, .name for a
+    member name, or the bare name after an empty path, as the Go verifier's
+    pathSegment.appendTo writes them."""
+    path = label
+    for key in keys:
+        if isinstance(key, int):
+            path += f"[{key}]"
+        elif path:
+            path += "." + key
+        else:
+            path = key
+    return path
 
 
 def load_fixture(path: Path) -> dict:
