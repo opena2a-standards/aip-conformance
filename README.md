@@ -27,7 +27,7 @@ fixture follows and a summary:
 fixtures: 12 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
 PASS  fixtures/challenge-response-echoed-agent-differs.json
        expected: REJECT [SIGNATURE_INVALID]
-       observed: REJECT[SIGNATURE_INVALID: response.agentDid does not match challenge.agentDid]
+       observed: REJECT[SIGNATURE_INVALID: response.agentDid "did:opena2a:agent:agent_conformance_test_002" does not match challenge.agentDid "did:opena2a:agent:agent_conformance_test_001"]
 ...
 summary: 12 pass, 0 fail (12 fixtures)
 ```

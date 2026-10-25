@@ -20,6 +20,11 @@ fails decides the reject category:
    (`UNTRUSTED_ISSUER`). A `trustedIssuers` that is missing, null or empty
    holds no issuer, so this check refuses every `issuerDid`.
 
+When an echoed field differs, the reason shows both values, and the
+`UNTRUSTED_KEY` and `UNTRUSTED_ISSUER` reasons and the ACCEPT note show the
+DID they name; each value is written in double quotes, escaped as Go's
+`strconv.QuoteToASCII` escapes it, so both verifiers print the same bytes.
+
 All fixtures use:
 
 - Trusted issuer DID: `did:opena2a:authority:opena2a.org` (the IdP that issued the challenge)

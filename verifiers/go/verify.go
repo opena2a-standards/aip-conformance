@@ -867,7 +867,7 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 			return result{
 				verdict:        "REJECT",
 				rejectCategory: "SIGNATURE_INVALID",
-				reason:         fmt.Sprintf("response.%s does not match challenge.%s", e.name, e.name),
+				reason:         fmt.Sprintf("response.%s %s does not match challenge.%s %s", e.name, strconv.QuoteToASCII(e.response), e.name, strconv.QuoteToASCII(e.challenge)),
 			}
 		}
 	}
@@ -902,7 +902,7 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
-			reason:         fmt.Sprintf("challenge.agentDid %s has no agentBinding in verifierState", cr.Challenge.AgentDID),
+			reason:         fmt.Sprintf("challenge.agentDid %s has no agentBinding in verifierState", strconv.QuoteToASCII(cr.Challenge.AgentDID)),
 		}
 	}
 	if bound.publicKeyHexProblem != "" {
@@ -913,7 +913,7 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
-			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", cr.Challenge.AgentDID, quotedKey(boundPubHex), quotedKey(bound.PublicKeyHex)),
+			reason:         fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)", strconv.QuoteToASCII(cr.Challenge.AgentDID), quotedKey(boundPubHex), quotedKey(bound.PublicKeyHex)),
 		}
 	}
 
@@ -957,13 +957,13 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_ISSUER",
-			reason:         fmt.Sprintf("challenge.issuerDid %s is not in verifierState.trustedIssuers", cr.Challenge.IssuerDID),
+			reason:         fmt.Sprintf("challenge.issuerDid %s is not in verifierState.trustedIssuers", strconv.QuoteToASCII(cr.Challenge.IssuerDID)),
 		}
 	}
 
 	return result{
 		verdict:        "ACCEPT",
-		signaturesNote: fmt.Sprintf("signature: ed25519=true (verified against agentDid %s bound key)", cr.Challenge.AgentDID),
+		signaturesNote: fmt.Sprintf("signature: ed25519=true (verified against agentDid %s bound key)", strconv.QuoteToASCII(cr.Challenge.AgentDID)),
 	}
 }
 

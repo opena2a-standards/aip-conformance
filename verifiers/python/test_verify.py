@@ -678,7 +678,7 @@ class TimestampTest(unittest.TestCase):
         if verdict == "ACCEPT":
             lines = (
                 "       expected: ACCEPT\n       observed: ACCEPT\n"
-                "       signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)\n"
+                "       signature: ed25519=true (verified against agentDid \"did:opena2a:agent:agent_conformance_test_001\" bound key)\n"
             )
         else:
             lines = f"       expected: REJECT [{category}]\n       observed: REJECT[{category}: {reason}]\n"
@@ -823,6 +823,13 @@ def fail_block(path: Path, line: str) -> str:
     return f"FAIL  {path}\n       {line}\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
 
 
+def echo_mismatch(field: str, echoed: str, signed: str) -> str:
+    """The reason for a response echo of field that differs from the
+    challenge body's, for values of printable ASCII with no " or \\, which
+    the reason writes between double quotes as they are."""
+    return f'response.{field} "{echoed}" does not match challenge.{field} "{signed}"'
+
+
 class ChallengeBodyChecksTest(unittest.TestCase):
     """Each of the five fields a response echoes must equal the challenge
     body's, which the signature covers, or the transcript is REJECT
@@ -850,17 +857,17 @@ class ChallengeBodyChecksTest(unittest.TestCase):
 
         trusted = [PROBE_ISSUER]
         other_issuer = ["did:opena2a:authority:other.example"]
-        not_trusted = f"challenge.issuerDid {PROBE_ISSUER} is not in verifierState.trustedIssuers"
+        not_trusted = f"challenge.issuerDid \"{PROBE_ISSUER}\" is not in verifierState.trustedIssuers"
         cases = [
             (
                 "the challenged agent answers",
                 cb, probe_answer(cb, a, a.did), state(trusted, a),
-                "", f"signature: ed25519=true (verified against agentDid {a.did} bound key)",
+                "", f"signature: ed25519=true (verified against agentDid \"{a.did}\" bound key)",
             ),
             (
                 "the response echoes a nonce the challenge body does not carry",
                 replayed, probe_answer(replayed, a, a.did, nonce=fresh), state(trusted, a),
-                "SIGNATURE_INVALID", "response.nonce does not match challenge.nonce",
+                "SIGNATURE_INVALID", echo_mismatch("nonce", fresh, seen),
             ),
             (
                 "the challenge body's nonce was already seen",
@@ -870,39 +877,39 @@ class ChallengeBodyChecksTest(unittest.TestCase):
             (
                 "another agent answers under its own key and DID",
                 cb, probe_answer(cb, b, b.did), state(trusted, a, b),
-                "SIGNATURE_INVALID", "response.agentDid does not match challenge.agentDid",
+                "SIGNATURE_INVALID", echo_mismatch("agentDid", b.did, a.did),
             ),
             (
                 "another agent's key echoes the challenged agent's DID",
                 cb, probe_answer(cb, b, a.did), state(trusted, a, b),
                 "UNTRUSTED_KEY",
-                f"response.publicKey does not match bound key for agentDid {a.did} "
+                f"response.publicKey does not match bound key for agentDid \"{a.did}\" "
                 f"(got {b.public.hex()[:16]}..., bound is {a.public.hex()[:16]}...)",
             ),
             (
                 "the challenged agent has no binding",
                 cb, probe_answer(cb, a, a.did), state(trusted, b),
-                "UNTRUSTED_KEY", f"challenge.agentDid {a.did} has no agentBinding in verifierState",
+                "UNTRUSTED_KEY", f"challenge.agentDid \"{a.did}\" has no agentBinding in verifierState",
             ),
             (
                 "the response echoes another challenge",
                 cb, probe_answer(cb, a, a.did, challenge=probe_bytes(8, 32)), state(trusted, a),
-                "SIGNATURE_INVALID", "response.challenge does not match challenge.challenge",
+                "SIGNATURE_INVALID", echo_mismatch("challenge", probe_bytes(8, 32), cb["challenge"]),
             ),
             (
                 "the response echoes issuedAt in another spelling of the same instant",
                 cb, probe_answer(cb, a, a.did, issuedAt="2026-05-27T23:58:00+00:00"), state(trusted, a),
-                "SIGNATURE_INVALID", "response.issuedAt does not match challenge.issuedAt",
+                "SIGNATURE_INVALID", echo_mismatch("issuedAt", "2026-05-27T23:58:00+00:00", cb["issuedAt"]),
             ),
             (
                 "the response echoes another expiresAt",
                 cb, probe_answer(cb, a, a.did, expiresAt="2026-05-28T00:13:00Z"), state(trusted, a),
-                "SIGNATURE_INVALID", "response.expiresAt does not match challenge.expiresAt",
+                "SIGNATURE_INVALID", echo_mismatch("expiresAt", "2026-05-28T00:13:00Z", cb["expiresAt"]),
             ),
             (
                 "an echo that differs under an unbound key",
                 replayed, probe_answer(replayed, b, a.did, nonce=fresh), state(trusted, a),
-                "SIGNATURE_INVALID", "response.nonce does not match challenge.nonce",
+                "SIGNATURE_INVALID", echo_mismatch("nonce", fresh, seen),
             ),
             (
                 "the issuer is not trusted",
@@ -940,6 +947,70 @@ class ChallengeBodyChecksTest(unittest.TestCase):
                 self.assertEqual(out, pass_block(path, category, line))
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
+
+
+# Values written as JSON string text, each with the text a reason or note
+# line writes for it, Go's strconv.QuoteToASCII's.
+# ../go/verify_test.go holds the same table as quoteProbes.
+QUOTE_PROBES = (
+    ('"public\\u212aey"', '"public\\u212aey"'),
+    ('"\\u0131ssuedAt"', '"\\u0131ssuedAt"'),
+    ('"\\u0130d"', '"\\u0130d"'),
+    ('"i\\u017f\\u017fuedAt"', '"i\\u017f\\u017fuedAt"'),
+    ('"issued_at"', '"issued_at"'),
+    ('"TRUSTLEVEL"', '"TRUSTLEVEL"'),
+    ('""', '""'),
+    ('"did:opena2a:authority:opena2a.org "', '"did:opena2a:authority:opena2a.org "'),
+    ('"a\\nb"', '"a\\nb"'),
+    ('"nul\\u0000"', '"nul\\x00"'),
+    ('"del\\u007f"', '"del\\x7f"'),
+    ('"rtl\\u202eabc"', '"rtl\\u202eabc"'),
+    ('"zw\\u200bsp"', '"zw\\u200bsp"'),
+    ('"astral\\ud835\\udc00"', '"astral\\U0001d400"'),
+    ('"lone\\ud800"', '"lone\\ufffd"'),
+    ('"q\\"b\\\\s"', '"q\\"b\\\\s"'),
+    ('"2026-05-27T23:58:00+00:00"', '"2026-05-27T23:58:00+00:00"'),
+)
+
+
+class QuotedValueTest(unittest.TestCase):
+    """A response echo that differs from the challenge body shows both
+    values, and the UNTRUSTED_ISSUER reason shows the issuerDid, each as Go's
+    strconv.QuoteToASCII writes it, so a line feed in a value is written as
+    \\n on the reason's line. The cases are built from the valid fixture.
+    Each value of QUOTE_PROBES, read from its JSON string text as the
+    verifier reads a fixture's strings, is written as its quoted text.
+    ../go/verify_test.go builds the same cases, holds the same table and
+    expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+
+    def test_echo_and_issuer_reasons_quote_the_values(self) -> None:
+        for name, body, member, value, category, reason in (
+            (
+                "issuedAt echoed in another spelling of the same instant", "response", "issuedAt",
+                "2026-05-27T23:58:00+00:00", "SIGNATURE_INVALID",
+                'response.issuedAt "2026-05-27T23:58:00+00:00" does not match challenge.issuedAt "2026-05-27T23:58:00Z"',
+            ),
+            (
+                "an issuerDid holding a line feed", "challenge", "issuerDid",
+                "did:opena2a:authority:opena2a.org\n", "UNTRUSTED_ISSUER",
+                'challenge.issuerDid "did:opena2a:authority:opena2a.org\\n" is not in verifierState.trustedIssuers',
+            ),
+        ):
+            with self.subTest(name):
+                d = json.loads(self.text)
+                d["challengeResponse"][body][member] = value
+                d["expected"] = {"verifyResult": "REJECT", "rejectCategory": category}
+                path, code, out, err = run_text(json.dumps(d, indent=2) + "\n")
+                self.assertEqual(out, pass_block(path, category, reason))
+                self.assertEqual((code, err), (0, ""))
+
+    def test_each_probe_is_written_as_go_writes_it(self) -> None:
+        for text, quoted in QUOTE_PROBES:
+            with self.subTest(text):
+                self.assertEqual(verify._quote_ascii(json.loads(text)), quoted)
 
 
 # A value outside ASCII for each signed field that holds no timestamp,
@@ -991,9 +1062,10 @@ class NonAsciiFieldTest(unittest.TestCase):
 
     def test_each_field_gets_the_go_verdict(self) -> None:
         for member, value in NON_ASCII_FIELDS:
-            agent_did = value if member == "agentDid" else VALID_AGENT_DID
+            # The agentDid the note shows, as Go's strconv.QuoteToASCII writes it.
+            quoted_did = '"did:web:example.org:agents:caf\\u00e9"' if member == "agentDid" else f'"{VALID_AGENT_DID}"'
             for signed, category, line in (
-                (True, "", f"signature: ed25519=true (verified against agentDid {agent_did} bound key)"),
+                (True, "", f"signature: ed25519=true (verified against agentDid {quoted_did} bound key)"),
                 (False, "SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"),
             ):
                 for escaped in (False, True):
@@ -1008,7 +1080,7 @@ class NonAsciiFieldTest(unittest.TestCase):
     def test_file_is_read_as_utf8_under_the_c_locale(self) -> None:
         # The C locale with UTF-8 mode and locale coercion turned off, under
         # which the locale's encoding was US-ASCII on macOS when this test
-        # was written. Standard output is UTF-8, for the note.
+        # was written. Standard output is UTF-8.
         env = dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0", PYTHONIOENCODING="utf-8")
         encoding = subprocess.run(
             [sys.executable, "-c", "import locale; print(locale.getpreferredencoding(False))"],
@@ -1025,7 +1097,7 @@ class NonAsciiFieldTest(unittest.TestCase):
                 [sys.executable, str(Path(verify.__file__).resolve()), str(path)],
                 env=env, capture_output=True, encoding="utf-8",
             )
-        line = f"signature: ed25519=true (verified against agentDid {value} bound key)"
+        line = 'signature: ed25519=true (verified against agentDid "did:web:example.org:agents:caf\\u00e9" bound key)'
         self.assertEqual(run.stdout, pass_block(path, "", line))
         self.assertEqual((run.returncode, run.stderr), (0, ""))
 
@@ -1136,7 +1208,7 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                 ),
             ),
         ]
-        note = "signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)"
+        note = "signature: ed25519=true (verified against agentDid \"did:opena2a:agent:agent_conformance_test_001\" bound key)"
         for name, text in accepts:
             with self.subTest(name):
                 path, code, out, err = run_text(text)
@@ -1216,9 +1288,9 @@ class VerifierStateArrayMemberTest(unittest.TestCase):
                 self.assertEqual(code, 1)
 
     def test_null_and_missing_read_as_the_empty_array(self) -> None:
-        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
-        no_binding = f"challenge.agentDid {self.cb['agentDid']} has no agentBinding in verifierState"
-        not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
+        accepted = f"signature: ed25519=true (verified against agentDid \"{self.cb['agentDid']}\" bound key)"
+        no_binding = f"challenge.agentDid \"{self.cb['agentDid']}\" has no agentBinding in verifierState"
+        not_trusted = f"challenge.issuerDid \"{self.cb['issuerDid']}\" is not in verifierState.trustedIssuers"
 
         def edit(name: str, null: bool, category: str) -> str:
             def apply(d: dict) -> None:
@@ -1344,8 +1416,8 @@ class TrustedIssuersEntryTest(unittest.TestCase):
                 self.assertEqual(code, 1)
 
     def test_string_entry_is_compared_as_written(self) -> None:
-        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
-        not_trusted = f"challenge.issuerDid {self.cb['issuerDid']} is not in verifierState.trustedIssuers"
+        accepted = f"signature: ed25519=true (verified against agentDid \"{self.cb['agentDid']}\" bound key)"
+        not_trusted = f"challenge.issuerDid \"{self.cb['issuerDid']}\" is not in verifierState.trustedIssuers"
 
         def issuer_with_a_space_alone(d: dict) -> None:
             d["verifierState"]["trustedIssuers"] = [self.cb["issuerDid"] + " "]
@@ -1509,7 +1581,7 @@ class VerifierStateEntryTest(unittest.TestCase):
                 self.assert_fixture_error(text, line)
 
     def test_entry_of_its_type_is_read(self) -> None:
-        accepted = f"signature: ed25519=true (verified against agentDid {self.cb['agentDid']} bound key)"
+        accepted = f"signature: ed25519=true (verified against agentDid \"{self.cb['agentDid']}\" bound key)"
         unbound = dict(self.bound, agentDid="did:opena2a:agent:not_bound")
         cases = [
             ("seenNonces holding another nonce", self.with_state(seenNonces=[self.seen])),
