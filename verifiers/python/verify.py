@@ -177,6 +177,30 @@ def _string_member(body: Any, name: str) -> Any:
     return "" if value is None else value
 
 
+_QUOTE_ESCAPES = {'"': '\\"', "\\": "\\\\", "\a": "\\a", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\v": "\\v"}
+
+
+def _quote_ascii(value: Any) -> str:
+    """value as Go's strconv.QuoteToASCII writes it."""
+    if not isinstance(value, str):
+        value = json.dumps(value)
+    out = ['"']
+    for ch in _UNPAIRED_SURROGATE.sub(chr(0xFFFD), value):
+        o = ord(ch)
+        if ch in _QUOTE_ESCAPES:
+            out.append(_QUOTE_ESCAPES[ch])
+        elif 0x20 <= o < 0x7F:
+            out.append(ch)
+        elif o < 0x20 or o == 0x7F:
+            out.append(f"\\x{o:02x}")
+        elif o < 0x10000:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(f"\\U{o:08x}")
+    out.append('"')
+    return "".join(out)
+
+
 def verify_challenge_response(cr: dict, vs: Any) -> Result:
     """Apply the AIP §5.1 step-5 checks in order. First failing check wins.
     vs is the fixture's verifierState; a member of it that a check reads and
@@ -197,8 +221,10 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
     # (1) The response echoes the challenge body, whose canonical payload the
     # signature covers, and the signature verifies
     for name in _ECHOED_FIELDS:
-        if _string_member(response, name) != _string_member(challenge, name):
-            return Result("REJECT", "SIGNATURE_INVALID", f"response.{name} does not match challenge.{name}")
+        echoed, signed = _string_member(response, name), _string_member(challenge, name)
+        if echoed != signed:
+            return Result("REJECT", "SIGNATURE_INVALID",
+                          f"response.{name} {_quote_ascii(echoed)} does not match challenge.{name} {_quote_ascii(signed)}")
     try:
         pub_bytes = _b64_no_pad_decode(response["publicKey"])
     except Exception as e:
@@ -229,7 +255,7 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
     found = _lookup_agent_binding(vs, agent_did)
     if found is None:
         return Result("REJECT", "UNTRUSTED_KEY",
-                      f"challenge.agentDid {agent_did} has no agentBinding in verifierState")
+                      f"challenge.agentDid {_quote_ascii(agent_did)} has no agentBinding in verifierState")
     binding, bound = found
     bound_key = _member(bound, binding, "publicKeyHex")
     bound_pub_hex = pub_bytes.hex()
@@ -241,7 +267,7 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
             raise FixtureError(f"{binding}.publicKeyHex", f"{_json_type(bound_key)}, not a string")
         return Result(
             "REJECT", "UNTRUSTED_KEY",
-            f"response.publicKey does not match bound key for agentDid {agent_did} "
+            f"response.publicKey does not match bound key for agentDid {_quote_ascii(agent_did)} "
             f"(got {bound_pub_hex[:16]}..., bound is {bound_key[:16]}...)",
         )
 
@@ -266,11 +292,11 @@ def verify_challenge_response(cr: dict, vs: Any) -> Result:
     issuer_did = _string_member(challenge, "issuerDid")
     if issuer_did not in _array_member(vs, "trustedIssuers"):
         return Result("REJECT", "UNTRUSTED_ISSUER",
-                      f"challenge.issuerDid {issuer_did} is not in verifierState.trustedIssuers")
+                      f"challenge.issuerDid {_quote_ascii(issuer_did)} is not in verifierState.trustedIssuers")
 
     return Result(
         verdict="ACCEPT",
-        signatures_note=f"signature: ed25519=true (verified against agentDid {agent_did} bound key)",
+        signatures_note=f"signature: ed25519=true (verified against agentDid {_quote_ascii(agent_did)} bound key)",
     )
 
 

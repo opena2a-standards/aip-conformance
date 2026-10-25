@@ -455,8 +455,8 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	badSignature := signatureInvalid(later(later(withBindings(withoutKey))))
 	mismatch := func(quoted string) string {
 		return "       expected: ACCEPT\n" +
-			"       observed: REJECT[UNTRUSTED_KEY: response.publicKey does not match bound key for agentDid " + agent +
-			" (got " + key[:16] + "..., bound is " + quoted + "...)]\n"
+			"       observed: REJECT[UNTRUSTED_KEY: response.publicKey does not match bound key for agentDid \"" + agent +
+			"\" (got " + key[:16] + "..., bound is " + quoted + "...)]\n"
 	}
 
 	dir := t.TempDir()
@@ -501,7 +501,7 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 				"       observed: REJECT[SIGNATURE_INVALID: Ed25519 signature did not verify against the canonical 5-field payload]\n"},
 		{"a response echo that differs, with no publicKeyHex", echoDiffers, true,
 			"       expected: REJECT [SIGNATURE_INVALID]\n" +
-				"       observed: REJECT[SIGNATURE_INVALID: response.issuedAt does not match challenge.issuedAt]\n"},
+				"       observed: REJECT[SIGNATURE_INVALID: response.issuedAt \"2026-05-27T23:58:00Z\" does not match challenge.issuedAt \"2026-05-27T23:59:00Z\"]\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -798,7 +798,7 @@ func assertVerdict(t *testing.T, doc map[string]any, verdict, category, reason s
 	t.Helper()
 	expected := map[string]any{"verifyResult": verdict}
 	lines := "       expected: ACCEPT\n       observed: ACCEPT\n" +
-		"       signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)\n"
+		"       signature: ed25519=true (verified against agentDid \"did:opena2a:agent:agent_conformance_test_001\" bound key)\n"
 	if category != "" {
 		expected["rejectCategory"] = category
 		lines = fmt.Sprintf("       expected: REJECT [%s]\n       observed: REJECT[%s: %s]\n", category, category, reason)
@@ -999,6 +999,13 @@ func failBlock(path, line string) string {
 	return "FAIL  " + path + "\n       " + line + "\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
 }
 
+// echoMismatch is the reason for a response echo of field that differs from
+// the challenge body's, for values of printable ASCII with no " or \, which
+// the reason writes between double quotes as they are.
+func echoMismatch(field, echoed, signed string) string {
+	return "response." + field + " \"" + echoed + "\" does not match challenge." + field + " \"" + signed + "\""
+}
+
 // TestChecksReadTheChallengeBody: each of the five fields a response echoes
 // must equal the challenge body's, which the signature covers, or the
 // transcript is REJECT [SIGNATURE_INVALID] naming the field; the fields are
@@ -1024,7 +1031,7 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 	otherIssuer := []string{"did:opena2a:authority:other.example"}
 	expired := state(otherIssuer, a)
 	expired.ClockRFC3339 = "2026-05-28T00:05:00Z"
-	notTrusted := "challenge.issuerDid " + probeIssuer + " is not in verifierState.trustedIssuers"
+	notTrusted := "challenge.issuerDid \"" + probeIssuer + "\" is not in verifierState.trustedIssuers"
 
 	cases := []struct {
 		name     string
@@ -1034,31 +1041,31 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 		line     string
 	}{
 		{"the challenged agent answers", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(trusted, a),
-			"", "signature: ed25519=true (verified against agentDid " + a.did + " bound key)"},
+			"", "signature: ed25519=true (verified against agentDid \"" + a.did + "\" bound key)"},
 		{"the response echoes a nonce the challenge body does not carry",
 			ChallengeResponse{replayed, probeAnswer(replayed, a, a.did, func(r *ResponseBody) { r.Nonce = fresh })}, state(trusted, a),
-			"SIGNATURE_INVALID", "response.nonce does not match challenge.nonce"},
+			"SIGNATURE_INVALID", echoMismatch("nonce", fresh, seen)},
 		{"the challenge body's nonce was already seen", ChallengeResponse{replayed, probeAnswer(replayed, a, a.did, nil)}, state(trusted, a),
 			"NONCE_REPLAY", "challenge.nonce was already seen by the verifier"},
 		{"another agent answers under its own key and DID", ChallengeResponse{cb, probeAnswer(cb, b, b.did, nil)}, state(trusted, a, b),
-			"SIGNATURE_INVALID", "response.agentDid does not match challenge.agentDid"},
+			"SIGNATURE_INVALID", echoMismatch("agentDid", b.did, a.did)},
 		{"another agent's key echoes the challenged agent's DID", ChallengeResponse{cb, probeAnswer(cb, b, a.did, nil)}, state(trusted, a, b),
-			"UNTRUSTED_KEY", fmt.Sprintf("response.publicKey does not match bound key for agentDid %s (got %s..., bound is %s...)",
+			"UNTRUSTED_KEY", fmt.Sprintf("response.publicKey does not match bound key for agentDid \"%s\" (got %s..., bound is %s...)",
 				a.did, hex.EncodeToString(b.publicKey())[:16], hex.EncodeToString(a.publicKey())[:16])},
 		{"the challenged agent has no binding", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(trusted, b),
-			"UNTRUSTED_KEY", "challenge.agentDid " + a.did + " has no agentBinding in verifierState"},
+			"UNTRUSTED_KEY", "challenge.agentDid \"" + a.did + "\" has no agentBinding in verifierState"},
 		{"the response echoes another challenge",
 			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.Challenge = probeBytes(8, 32) })}, state(trusted, a),
-			"SIGNATURE_INVALID", "response.challenge does not match challenge.challenge"},
+			"SIGNATURE_INVALID", echoMismatch("challenge", probeBytes(8, 32), cb.Challenge)},
 		{"the response echoes issuedAt in another spelling of the same instant",
 			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.IssuedAt = "2026-05-27T23:58:00+00:00" })}, state(trusted, a),
-			"SIGNATURE_INVALID", "response.issuedAt does not match challenge.issuedAt"},
+			"SIGNATURE_INVALID", echoMismatch("issuedAt", "2026-05-27T23:58:00+00:00", cb.IssuedAt)},
 		{"the response echoes another expiresAt",
 			ChallengeResponse{cb, probeAnswer(cb, a, a.did, func(r *ResponseBody) { r.ExpiresAt = "2026-05-28T00:13:00Z" })}, state(trusted, a),
-			"SIGNATURE_INVALID", "response.expiresAt does not match challenge.expiresAt"},
+			"SIGNATURE_INVALID", echoMismatch("expiresAt", "2026-05-28T00:13:00Z", cb.ExpiresAt)},
 		{"an echo that differs under an unbound key",
 			ChallengeResponse{replayed, probeAnswer(replayed, b, a.did, func(r *ResponseBody) { r.Nonce = fresh })}, state(trusted, a),
-			"SIGNATURE_INVALID", "response.nonce does not match challenge.nonce"},
+			"SIGNATURE_INVALID", echoMismatch("nonce", fresh, seen)},
 		{"the issuer is not trusted", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(otherIssuer, a),
 			"UNTRUSTED_ISSUER", notTrusted},
 		{"no issuer is trusted", ChallengeResponse{cb, probeAnswer(cb, a, a.did, nil)}, state(nil, a),
@@ -1090,6 +1097,66 @@ func TestChecksReadTheChallengeBody(t *testing.T) {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
 		})
+	}
+}
+
+// TestEchoAndIssuerReasonsQuoteTheValues: a response echo that differs from
+// the challenge body shows both values, and the UNTRUSTED_ISSUER reason shows
+// the issuerDid, each as strconv.QuoteToASCII writes it, so a line feed in a
+// value is written as \n on the reason's line. The cases are built from the
+// valid fixture. ../python/test_verify.py builds the same cases and expects
+// the same lines.
+func TestEchoAndIssuerReasonsQuoteTheValues(t *testing.T) {
+	cases := []struct{ name, body, member, value, category, reason string }{
+		{"issuedAt echoed in another spelling of the same instant", "response", "issuedAt", "2026-05-27T23:58:00+00:00",
+			"SIGNATURE_INVALID", `response.issuedAt "2026-05-27T23:58:00+00:00" does not match challenge.issuedAt "2026-05-27T23:58:00Z"`},
+		{"an issuerDid holding a line feed", "challenge", "issuerDid", "did:opena2a:authority:opena2a.org\n",
+			"UNTRUSTED_ISSUER", `challenge.issuerDid "did:opena2a:authority:opena2a.org\n" is not in verifierState.trustedIssuers`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := validDoc(t)
+			object(doc, "challengeResponse", tc.body)[tc.member] = tc.value
+			assertVerdict(t, doc, "REJECT", tc.category, tc.reason)
+		})
+	}
+}
+
+// quoteProbes are values written as JSON string text, each with the text a
+// reason or note line writes for it, strconv.QuoteToASCII's.
+// ../python/test_verify.py holds the same table as QUOTE_PROBES.
+var quoteProbes = []struct{ value, quoted string }{
+	{"\"public\\u212aey\"", "\"public\\u212aey\""},
+	{"\"\\u0131ssuedAt\"", "\"\\u0131ssuedAt\""},
+	{"\"\\u0130d\"", "\"\\u0130d\""},
+	{"\"i\\u017f\\u017fuedAt\"", "\"i\\u017f\\u017fuedAt\""},
+	{"\"issued_at\"", "\"issued_at\""},
+	{"\"TRUSTLEVEL\"", "\"TRUSTLEVEL\""},
+	{"\"\"", "\"\""},
+	{"\"did:opena2a:authority:opena2a.org \"", "\"did:opena2a:authority:opena2a.org \""},
+	{"\"a\\nb\"", "\"a\\nb\""},
+	{"\"nul\\u0000\"", "\"nul\\x00\""},
+	{"\"del\\u007f\"", "\"del\\x7f\""},
+	{"\"rtl\\u202eabc\"", "\"rtl\\u202eabc\""},
+	{"\"zw\\u200bsp\"", "\"zw\\u200bsp\""},
+	{"\"astral\\ud835\\udc00\"", "\"astral\\U0001d400\""},
+	{"\"lone\\ud800\"", "\"lone\\ufffd\""},
+	{"\"q\\\"b\\\\s\"", "\"q\\\"b\\\\s\""},
+	{"\"2026-05-27T23:58:00+00:00\"", "\"2026-05-27T23:58:00+00:00\""},
+}
+
+// TestQuoteToASCIIWritesEachProbe: each value of quoteProbes, read from its
+// JSON string text as the verifier reads a fixture's strings, is written as
+// its quoted text, which ../python/verify.py's _quote_ascii writes too.
+func TestQuoteToASCIIWritesEachProbe(t *testing.T) {
+	for _, tc := range quoteProbes {
+		var value string
+		if err := json.Unmarshal([]byte(tc.value), &value); err != nil {
+			t.Fatalf("%s: %v", tc.value, err)
+		}
+		if got := strconv.QuoteToASCII(value); got != tc.quoted {
+			t.Errorf("%s is written as %s, want %s", tc.value, got, tc.quoted)
+		}
 	}
 }
 
@@ -1132,9 +1199,10 @@ func asciiJSON(text string) string {
 // same lines.
 func TestNonASCIIFieldGetsThePythonVerdict(t *testing.T) {
 	for _, tc := range nonASCIIFields {
-		agentDID := "did:opena2a:agent:agent_conformance_test_001"
+		// The agentDid the note shows, as strconv.QuoteToASCII writes it.
+		quotedDID := "\"did:opena2a:agent:agent_conformance_test_001\""
 		if tc.member == "agentDid" {
-			agentDID = tc.value
+			quotedDID = "\"did:web:example.org:agents:caf\\u00e9\""
 		}
 		for _, signed := range []bool{true, false} {
 			doc := validDoc(t)
@@ -1143,7 +1211,7 @@ func TestNonASCIIFieldGetsThePythonVerdict(t *testing.T) {
 			if tc.member == "agentDid" {
 				object(doc, "verifierState")["agentBindings"].([]any)[0].(map[string]any)["agentDid"] = tc.value
 			}
-			category, line := "", "signature: ed25519=true (verified against agentDid "+agentDID+" bound key)"
+			category, line := "", "signature: ed25519=true (verified against agentDid "+quotedDID+" bound key)"
 			if signed {
 				signChallenge(t, doc, nil)
 				doc["expected"] = map[string]any{"verifyResult": "ACCEPT"}
@@ -1254,7 +1322,7 @@ func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 	for _, tc := range accepts {
 		t.Run(tc.name, func(t *testing.T) {
 			path, code, out := runText(t, tc.doc)
-			want := passBlock(path, "", "signature: ed25519=true (verified against agentDid did:opena2a:agent:agent_conformance_test_001 bound key)")
+			want := passBlock(path, "", "signature: ed25519=true (verified against agentDid \"did:opena2a:agent:agent_conformance_test_001\" bound key)")
 			if code != 0 || out != want {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
@@ -1353,9 +1421,9 @@ func TestVerifierStateArrayMemberThatIsNotAnArrayIsAFixtureError(t *testing.T) {
 		})
 	}
 
-	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
-	noBinding := "challenge.agentDid " + cb.AgentDID + " has no agentBinding in verifierState"
-	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
+	accepted := "signature: ed25519=true (verified against agentDid \"" + cb.AgentDID + "\" bound key)"
+	noBinding := "challenge.agentDid \"" + cb.AgentDID + "\" has no agentBinding in verifierState"
+	notTrusted := "challenge.issuerDid \"" + cb.IssuerDID + "\" is not in verifierState.trustedIssuers"
 	empties := []struct{ name, doc, category, line string }{
 		{"seenNonces null", set(doc, "seenNonces", "null"), "", accepted},
 		{"no seenNonces", without("seenNonces"), "", accepted},
@@ -1458,8 +1526,8 @@ func TestTrustedIssuersEntryThatIsNotAStringIsAFixtureError(t *testing.T) {
 		})
 	}
 
-	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
-	notTrusted := "challenge.issuerDid " + cb.IssuerDID + " is not in verifierState.trustedIssuers"
+	accepted := "signature: ed25519=true (verified against agentDid \"" + cb.AgentDID + "\" bound key)"
+	notTrusted := "challenge.issuerDid \"" + cb.IssuerDID + "\" is not in verifierState.trustedIssuers"
 	stringEntries := []struct{ name, doc, category, line string }{
 		{"another issuer's DID before the issuer", set(doc, "trustedIssuers", `["did:opena2a:authority:example.org", `+issuer+`]`), "", accepted},
 		{"a space before the issuer", set(doc, "trustedIssuers", `[" ", `+issuer+`]`), "", accepted},
@@ -1582,7 +1650,7 @@ func TestVerifierStateArrayEntryOfAnotherTypeIsAFixtureError(t *testing.T) {
 		})
 	}
 
-	accepted := "signature: ed25519=true (verified against agentDid " + cb.AgentDID + " bound key)"
+	accepted := "signature: ed25519=true (verified against agentDid \"" + cb.AgentDID + "\" bound key)"
 	for _, tc := range []struct{ name, doc string }{
 		{"seenNonces holding another nonce", set(doc, "seenNonces", "["+seen+"]")},
 		{"seenNonces holding a space", set(doc, "seenNonces", `[" "]`)},
