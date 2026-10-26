@@ -30,9 +30,11 @@ field in range. Such a value enters the payload as the same time in UTC,
 written `YYYY-MM-DDThh:mm:ssZ` without its fraction (an offset can move
 year 0 to year -1, written `-0001`, and year 9999 to year 10000, written
 `10000`); any other value enters as written. They read
-`verifierState.clockRfc3339` the same way, and when the expiry check
-reaches a clock that is missing, null, or a string not of that form, the
-fixture fails with a fixture error naming the member instead of a verdict.
+`verifierState.clockRfc3339` the same way: a `clockRfc3339` that is missing
+or is not a string fails the fixture before any check runs
+([catalogue](checks.md#load-error-fixtures)), and when the expiry check
+reaches a clock string not of that form, the fixture fails with a fixture
+error naming the member instead of a verdict.
 
 Fields in the response body that are NOT covered by the signature include
 `publicKey`, `keyId`, `signedAt`, `algorithm`. A consequence is that an

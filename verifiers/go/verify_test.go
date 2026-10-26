@@ -378,17 +378,19 @@ func TestRepeatedMemberWalkAllocatesInProportionToTheDocument(t *testing.T) {
 	}
 }
 
-// TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn: when the
-// agentBindings entry for challenge.agentDid has no publicKeyHex, a null one,
-// or a string shorter than 16 characters that is not the response key, the
-// fixture prints one FAIL block, and the run goes on to the next fixture and
-// prints the summary line. A missing or null publicKeyHex is a fixture error
-// naming the member; a short string is quoted whole in the REJECT
-// [UNTRUSTED_KEY] reason. The cases are built from the valid fixture, and
-// each runs before a copy of it, whose PASS block follows unchanged. The
+// TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn: when an
+// agentBindings entry has no publicKeyHex or a null one, or the entry for
+// challenge.agentDid holds a string shorter than 16 characters that is not
+// the response key, the fixture prints one FAIL block, and the run goes on to
+// the next fixture and prints the summary line. A missing or null
+// publicKeyHex is a fixture error naming the member before any check runs,
+// in an entry for another agentDid and under a signature that does not
+// verify too; a short string is quoted whole in the REJECT [UNTRUSTED_KEY]
+// reason when check 2 reads it. The cases are built from the valid fixture,
+// and each runs before a copy of it, whose PASS block follows unchanged. The
 // checks do not read an entry for another agentDid, or any entry when a
 // response echo differs from the challenge or the signature does not verify,
-// so those cases keep their verdicts.
+// so a short string there keeps the verdict.
 // ../python/verify.py prints the same lines for copies edited the same way.
 func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
@@ -434,6 +436,10 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 		delete(bound, "publicKeyHex")
 		return []map[string]any{bound}
 	}
+	withShortKey := func(bound, _ map[string]any) []map[string]any {
+		bound["publicKeyHex"] = "abc"
+		return []map[string]any{bound}
+	}
 	replaced := func(text, from, to string) string {
 		t.Helper()
 		if !strings.Contains(text, from) {
@@ -451,8 +457,9 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	signatureInvalid := func(text string) string {
 		return replaced(text, `"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`)
 	}
-	echoDiffers := signatureInvalid(later(withBindings(withoutKey)))
-	badSignature := signatureInvalid(later(later(withBindings(withoutKey))))
+	echoDiffers := signatureInvalid(later(withBindings(withShortKey)))
+	badSignature := signatureInvalid(later(later(withBindings(withShortKey))))
+	badSignatureNoKey := signatureInvalid(later(later(withBindings(withoutKey))))
 	mismatch := func(quoted string) string {
 		return "       expected: ACCEPT\n" +
 			"       observed: REJECT[UNTRUSTED_KEY: response.publicKey does not match bound key for agentDid \"" + agent +
@@ -495,11 +502,17 @@ func TestShortOrMissingBoundKeyFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 		{"an entry for another agentDid with no publicKeyHex", withBindings(func(bound, other map[string]any) []map[string]any {
 			delete(other, "publicKeyHex")
 			return []map[string]any{other, bound}
+		}), false, "       fixture error: verifierState.agentBindings[0].publicKeyHex: missing\n"},
+		{"an entry for another agentDid with publicKeyHex abc", withBindings(func(bound, other map[string]any) []map[string]any {
+			other["publicKeyHex"] = "abc"
+			return []map[string]any{other, bound}
 		}), true, strings.TrimPrefix(validBlock, "PASS  "+valid+"\n")},
-		{"a signature that does not verify, with no publicKeyHex", badSignature, true,
+		{"a signature that does not verify, with no publicKeyHex", badSignatureNoKey, false,
+			"       fixture error: verifierState.agentBindings[0].publicKeyHex: missing\n"},
+		{"a signature that does not verify, with publicKeyHex abc", badSignature, true,
 			"       expected: REJECT [SIGNATURE_INVALID]\n" +
 				"       observed: REJECT[SIGNATURE_INVALID: Ed25519 signature did not verify against the canonical 5-field payload]\n"},
-		{"a response echo that differs, with no publicKeyHex", echoDiffers, true,
+		{"a response echo that differs, with publicKeyHex abc", echoDiffers, true,
 			"       expected: REJECT [SIGNATURE_INVALID]\n" +
 				"       observed: REJECT[SIGNATURE_INVALID: response.issuedAt \"2026-05-27T23:58:00Z\" does not match challenge.issuedAt \"2026-05-27T23:59:00Z\"]\n"},
 	}
@@ -596,9 +609,11 @@ func TestVerifierStateArrayOfAnotherTypeIsAFixtureError(t *testing.T) {
 // a date-time is a fixture error naming the member, the line the Python
 // verifier prints for the same file apart from the quotes around the value
 // (%q here, repr there). The cases are built from the valid fixture, and
-// each runs before a copy of it, whose PASS block follows unchanged. The
-// checks do not read verifierState when the signature does not verify, so
-// that case keeps its verdict.
+// each runs before a copy of it, whose PASS block follows unchanged. A
+// missing or null clockRfc3339 fails the fixture before any check runs,
+// under a signature that does not verify too; the checks read the string
+// only after the signature verifies, so a string the verifier does not read
+// keeps the verdict under a signature that does not verify.
 func TestUnreadableClockFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
 	if err != nil {
@@ -614,9 +629,11 @@ func TestUnreadableClockFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 	}
 	// A later issuedAt in the challenge body and in the response's echo of it
 	// keeps the echo and is a signature that does not verify.
-	badSignature := strings.Replace(strings.Replace(withClock(`"clockRfc3339": null`),
-		`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2),
-		`"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`, 1)
+	badSignature := func(text string) string {
+		return strings.Replace(strings.Replace(text,
+			`"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2),
+			`"verifyResult": "ACCEPT"`, `"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"`, 1)
+	}
 	form := "is not of the form YYYY-MM-DDThh:mm:ss[.fraction] followed by Z, +hh:mm or -hh:mm"
 
 	dir := t.TempDir()
@@ -652,6 +669,10 @@ func TestUnreadableClockFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 			`fixture error: verifierState.clockRfc3339: cannot be read as a date-time ("" ` + form + `)`},
 		{"clockRfc3339 with a one-digit hour", withClock(`"clockRfc3339": "2026-05-28T0:00:00Z"`),
 			`fixture error: verifierState.clockRfc3339: cannot be read as a date-time ("2026-05-28T0:00:00Z" ` + form + `)`},
+		{"no clockRfc3339 under a signature that does not verify", badSignature(withoutClock),
+			"fixture error: verifierState.clockRfc3339: missing"},
+		{"clockRfc3339 null under a signature that does not verify", badSignature(withClock(`"clockRfc3339": null`)),
+			"fixture error: verifierState.clockRfc3339: null, not a string"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -664,8 +685,8 @@ func TestUnreadableClockFailsItsFixtureAndTheRunGoesOn(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a signature that does not verify, with clockRfc3339 null", func(t *testing.T) {
-		path := write(t, "fixture.json", badSignature)
+	t.Run("a signature that does not verify, with clockRfc3339 tomorrow", func(t *testing.T) {
+		path := write(t, "fixture.json", badSignature(withClock(`"clockRfc3339": "tomorrow"`)))
 		var stdout, stderr bytes.Buffer
 		code := run([]string{path}, &stdout, &stderr)
 		want := "PASS  " + path + "\n       expected: REJECT [SIGNATURE_INVALID]\n" +
@@ -1660,6 +1681,178 @@ func TestVerifierStateArrayEntryOfAnotherTypeIsAFixtureError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path, code, out := runText(t, tc.doc)
 			if want := passBlock(path, "", accepted); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestAgentBindingMemberOrClockThatIsMissingOrNotAStringIsAFixtureError: each
+// verifierState.agentBindings entry must hold an agentDid, an algorithm and a
+// publicKeyHex, each a string, and a verifierState.clockRfc3339 that is
+// written must be a string, which a challengeResponse fixture must write.
+// Anything else, null included, fails the fixture when it loads, so before
+// the signature check and for every fixture type, with one line naming the
+// first such member: the members of an entry in the order agentDid,
+// algorithm, publicKeyHex, each entry before the next, agentBindings before
+// clockRfc3339, and clockRfc3339 before seenNonces and trustedIssuers. A
+// string is read as written: an agentDid no challenge names binds nothing, a
+// clockRfc3339 the verifier does not read as a date-time fails the fixture
+// when the expiry check reads it, and a trustScoreComposition fixture reads
+// neither. The cases are built from the valid fixture, and some from a
+// trustScoreComposition fixture. ../python/test_verify.py builds the same
+// cases and expects the same lines.
+func TestAgentBindingMemberOrClockThatIsMissingOrNotAStringIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	var valid Fixture
+	if err := json.Unmarshal(raw, &valid); err != nil {
+		t.Fatal(err)
+	}
+	agent := valid.ChallengeResponse.Challenge.AgentDID
+	validClock := valid.VerifierState.ClockRFC3339
+	bindings := memberText(t, doc, "agentBindings")
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(bindings, `"agentBindings": `)), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0]["agentDid"] != agent {
+		t.Fatalf("the valid fixture writes the agentBindings entries %v, want one for %s", entries, agent)
+	}
+	// bound returns a copy of the bound entry with the members of set added
+	// or replaced and the members named in unset removed.
+	bound := func(set map[string]any, unset ...string) map[string]any {
+		entry := maps.Clone(entries[0])
+		maps.Copy(entry, set)
+		for _, name := range unset {
+			delete(entry, name)
+		}
+		return entry
+	}
+	// withEntries returns doc with agentBindings holding the entries; a nil
+	// entry is written as null.
+	withEntries := func(list ...map[string]any) string {
+		t.Helper()
+		edited, err := json.Marshal(list)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Replace(doc, bindings, `"agentBindings": `+string(edited), 1)
+	}
+	set := func(text, name, value string) string {
+		return strings.Replace(text, memberText(t, text, name), strconv.Quote(name)+": "+value, 1)
+	}
+	clockMember := memberText(t, doc, "clockRfc3339")
+	// The member and the line break and indentation after it.
+	withoutClock := strings.Replace(doc, clockMember+",\n    ", "", 1)
+	if withoutClock == doc {
+		t.Fatal("the valid fixture does not write clockRfc3339 before another verifierState member")
+	}
+	// A later issuedAt in the challenge body and in the response's echo of it
+	// keeps the echo and is a signature that does not verify.
+	badSignature := func(text string) string {
+		return strings.Replace(text, `"issuedAt": "2026-05-27T23:58:00Z"`, `"issuedAt": "2026-05-27T23:59:00Z"`, 2)
+	}
+	expecting := func(text, category string) string {
+		return set(text, "expected", `{"verifyResult": "REJECT", "rejectCategory": "`+category+`"}`)
+	}
+	composition, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryLine := func(index int, member, problem string) string {
+		return fmt.Sprintf("fixture error: verifierState.agentBindings[%d].%s: %s", index, member, problem)
+	}
+	clockLine := func(problem string) string { return "fixture error: verifierState.clockRfc3339: " + problem }
+
+	type testCase struct{ name, doc, line string }
+	var cases []testCase
+	for _, member := range []string{"agentDid", "algorithm", "publicKeyHex"} {
+		cases = append(cases, testCase{"no " + member, withEntries(bound(nil, member)), entryLine(0, member, "missing")})
+		for _, v := range []struct {
+			label string
+			value any
+			kind  string
+		}{
+			{"null", nil, "null"}, {"7", 7, "a number"}, {"true", true, "a boolean"},
+			{"empty array", []any{}, "an array"}, {"empty object", map[string]any{}, "an object"},
+		} {
+			cases = append(cases, testCase{member + " " + v.label, withEntries(bound(map[string]any{member: v.value})),
+				entryLine(0, member, v.kind+", not a string")})
+		}
+	}
+	for _, v := range []struct{ label, value, kind string }{
+		{"null", "null", "null"}, {"7", "7", "a number"}, {"false", "false", "a boolean"},
+		{"empty array", "[]", "an array"}, {"empty object", "{}", "an object"},
+		{"the clock in an array", "[" + strconv.Quote(validClock) + "]", "an array"},
+	} {
+		cases = append(cases, testCase{"clockRfc3339 " + v.label, set(doc, "clockRfc3339", v.value), clockLine(v.kind + ", not a string")})
+	}
+	cases = append(cases,
+		testCase{"no clockRfc3339", withoutClock, clockLine("missing")},
+		testCase{"AgentDid in place of agentDid", withEntries(bound(map[string]any{"AgentDid": agent}, "agentDid")), entryLine(0, "agentDid", "missing")},
+		testCase{"agentDid 7 and publicKeyHex 7", withEntries(bound(map[string]any{"agentDid": 7, "publicKeyHex": 7})), entryLine(0, "agentDid", "a number, not a string")},
+		testCase{"no algorithm and publicKeyHex null", withEntries(bound(map[string]any{"publicKeyHex": nil}, "algorithm")), entryLine(0, "algorithm", "missing")},
+		testCase{"the bound entry before an entry whose agentDid is 7", withEntries(bound(nil), bound(map[string]any{"agentDid": 7})),
+			entryLine(1, "agentDid", "a number, not a string")},
+		testCase{"an entry with no agentDid before a null entry", withEntries(bound(nil, "agentDid"), nil), entryLine(0, "agentDid", "missing")},
+		testCase{"an entry with no agentDid and clockRfc3339 7", set(withEntries(bound(nil, "agentDid")), "clockRfc3339", "7"), entryLine(0, "agentDid", "missing")},
+		testCase{"clockRfc3339 7 and a seenNonces entry null", set(set(doc, "clockRfc3339", "7"), "seenNonces", "[null]"), clockLine("a number, not a string")},
+		testCase{"clockRfc3339 null and trustedIssuers 0", set(set(doc, "clockRfc3339", "null"), "trustedIssuers", "0"), clockLine("null, not a string")},
+		testCase{"agentDid 7 under a signature that does not verify", badSignature(withEntries(bound(map[string]any{"agentDid": 7}))),
+			entryLine(0, "agentDid", "a number, not a string")},
+		testCase{"clockRfc3339 null under a signature that does not verify", badSignature(set(doc, "clockRfc3339", "null")), clockLine("null, not a string")},
+		testCase{"no clockRfc3339 under a signature that does not verify", badSignature(withoutClock), clockLine("missing")},
+		testCase{"algorithm 7 in a trustScoreComposition fixture",
+			appendMember(t, string(composition), `"verifierState": {"agentBindings": [{"agentDid": `+strconv.Quote(agent)+`, "algorithm": 7}]}`),
+			entryLine(0, "algorithm", "a number, not a string")},
+		testCase{"clockRfc3339 7 in a trustScoreComposition fixture", appendMember(t, string(composition), `"verifierState": {"clockRfc3339": 7}`),
+			clockLine("a number, not a string")},
+		testCase{"clockRfc3339 null in a trustScoreComposition fixture", appendMember(t, string(composition), `"verifierState": {"clockRfc3339": null}`),
+			clockLine("null, not a string")},
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	accepted := "signature: ed25519=true (verified against agentDid \"" + agent + "\" bound key)"
+	noBinding := "challenge.agentDid \"" + agent + "\" has no agentBinding in verifierState"
+	for _, tc := range []struct{ name, doc, category, line string }{
+		{"agentDid empty", expecting(withEntries(bound(map[string]any{"agentDid": ""})), "UNTRUSTED_KEY"), "UNTRUSTED_KEY", noBinding},
+		{"algorithm empty", withEntries(bound(map[string]any{"algorithm": ""})), "", accepted},
+		{"a signature that does not verify, with clockRfc3339 tomorrow",
+			expecting(badSignature(set(doc, "clockRfc3339", `"tomorrow"`)), "SIGNATURE_INVALID"),
+			"SIGNATURE_INVALID", "Ed25519 signature did not verify against the canonical 5-field payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, tc.category, tc.line); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	_, _, shipped := runText(t, string(composition))
+	for _, tc := range []struct{ name, doc string }{
+		{"a trustScoreComposition fixture with a verifierState that writes no clockRfc3339",
+			appendMember(t, string(composition), `"verifierState": {}`)},
+		{"a trustScoreComposition fixture with clockRfc3339 tomorrow",
+			appendMember(t, string(composition), `"verifierState": {"clockRfc3339": "tomorrow"}`)},
+		{"a trustScoreComposition fixture with an entry whose members are empty",
+			appendMember(t, string(composition), `"verifierState": {"agentBindings": [{"agentDid": "", "algorithm": "", "publicKeyHex": ""}]}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			_, block, _ := strings.Cut(shipped, "\n")
+			if want := "PASS  " + path + "\n" + block; code != 0 || out != want || !strings.HasPrefix(shipped, "PASS  ") {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
 		})
