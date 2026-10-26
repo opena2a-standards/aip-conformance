@@ -21,38 +21,37 @@
 // member name twice in the same JSON object fails to load on both verifiers,
 // which counts as a fail (exit code 1).
 //
-// A challengeResponse fixture whose agentBindings entry for challenge.agentDid
-// has no publicKeyHex member, or a null one, prints a FAIL block naming the
-// member, in the form the Python verifier uses for a fixture error:
-//
-//	FAIL  <path>
-//	       fixture error: verifierState.agentBindings[0].publicKeyHex: missing
-//
-// So does a verifierState.clockRfc3339 that is missing, null, or a string
-// parseRFC3339 does not read, as in
-//
-//	fixture error: verifierState.clockRfc3339: cannot be read as a date-time ("2026-05-28T00:00:00" has no UTC offset)
-//
-// The checks read verifierState only after the signature check passes. The
-// fixture counts as a fail, and the run goes on to the next fixture and
-// prints the summary line.
-//
 // A challengeResponse fixture whose verifierState is missing or is not an
 // object, a fixture of another fixtureType whose verifierState is neither an
 // object nor null, and a fixture of any fixtureType whose verifierState is an
 // object holding an agentBindings, seenNonces or trustedIssuers that is not an
-// array or null, an agentBindings entry that is not an object, or a seenNonces
-// or trustedIssuers entry that is not a non-empty string, null included,
-// prints that FAIL block before any check runs, with the line the Python
-// verifier prints for it:
+// array or null, an agentBindings entry that is not an object, an
+// agentBindings entry whose agentDid, algorithm or publicKeyHex is missing or
+// is not a string, a clockRfc3339 that is not a string, or a seenNonces or
+// trustedIssuers entry that is not a non-empty string, null included, prints
+// a FAIL block before any check runs, with the line the Python verifier
+// prints for it:
 //
 //	FAIL  <path>
 //	       fixture error: verifierState.seenNonces: a number, not an array
 //
-// The line for an entry names the first one the rule refuses, as in
+// So does a challengeResponse fixture whose verifierState writes no
+// clockRfc3339. The line names the first member or entry the rule refuses,
+// as in
 //
+//	fixture error: verifierState.agentBindings[0].agentDid: missing
+//	fixture error: verifierState.clockRfc3339: a number, not a string
 //	fixture error: verifierState.trustedIssuers[1]: a number, not a string
 //	fixture error: verifierState.seenNonces[0]: an empty string
+//
+// A challengeResponse fixture whose verifierState.clockRfc3339 is a string
+// parseRFC3339 does not read prints that FAIL block when the expiry check
+// reads it, after the signature and bound-key checks pass, as in
+//
+//	fixture error: verifierState.clockRfc3339: cannot be read as a date-time ("2026-05-28T00:00:00" has no UTC offset)
+//
+// Each counts as a fail, and the run goes on to the next fixture and prints
+// the summary line.
 //
 // Canonical signing form (5 fields, pipe-delimited) — MUST mirror
 // scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
@@ -94,26 +93,26 @@ import (
 // fixture wrapper (must match scripts/generate-fixtures shape)
 // ---------------------------------------------------------------------------
 
+// AgentBinding is a verifierState.agentBindings entry. checkVerifierState
+// refuses, before the decode, an entry that is not an object or whose
+// agentDid, algorithm or publicKeyHex is missing or is not a string, so each
+// field holds the member as written.
 type AgentBinding struct {
 	AgentDID     string `json:"agentDid"`
 	Algorithm    string `json:"algorithm"`
 	PublicKeyHex string `json:"publicKeyHex"`
-	// publicKeyHexProblem is "missing" when the entry writes no publicKeyHex
-	// member and "null, not a string" when it writes null there, both of
-	// which encoding/json decodes as the empty string. parseFixture sets it.
-	publicKeyHexProblem string
 }
 
+// VerifierState is a fixture's verifierState. checkVerifierState refuses,
+// before the decode, a clockRfc3339 that is not a string, and a
+// challengeResponse fixture that writes none, so ClockRFC3339 holds the
+// member as written for the checks; a missing or null array member decodes
+// as the empty slice.
 type VerifierState struct {
 	ClockRFC3339   string         `json:"clockRfc3339"`
 	TrustedIssuers []string       `json:"trustedIssuers"`
 	AgentBindings  []AgentBinding `json:"agentBindings"`
 	SeenNonces     []string       `json:"seenNonces"`
-	// clockRFC3339Problem is "missing" when the verifierState object writes
-	// no clockRfc3339 member and "null, not a string" when it writes null
-	// there, both of which encoding/json decodes as the empty string.
-	// parseFixture sets it.
-	clockRFC3339Problem string
 }
 
 type ExpectedOutcome struct {
@@ -214,12 +213,12 @@ var protocolMessageTypes = map[reflect.Type]bool{
 // reports for it. A challengeResponse fixture whose verifierState is missing
 // or is not an object is a *memberError, and so is a fixture of another
 // fixtureType whose verifierState is neither an object nor null, and a
-// verifierState agentBindings, seenNonces or trustedIssuers that is not an
-// array or null, or an entry of one that is not of the type
-// verifierStateArrays gives it (checkVerifierState). An agentBindings entry
-// that writes no publicKeyHex, or a null one, is marked for the checks
-// (markPublicKeyHexProblems), and so is a verifierState that writes no
-// clockRfc3339, or a null one (markClockProblem).
+// verifierState member or entry that checkVerifierState refuses: an
+// agentBindings, seenNonces or trustedIssuers that is not an array or null,
+// an entry of one that is not of the type verifierStateArrays gives it, an
+// agentBindings entry whose agentDid, algorithm or publicKeyHex is missing or
+// is not a string, and a clockRfc3339 that is not a string, or that a
+// challengeResponse fixture does not write.
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -231,12 +230,8 @@ func parseFixture(b []byte) (Fixture, error) {
 			return f, err
 		}
 	}
-	if err := json.Unmarshal(b, &f); err != nil {
-		return f, err
-	}
-	markPublicKeyHexProblems(b, f.VerifierState.AgentBindings)
-	markClockProblem(b, &f.VerifierState)
-	return f, nil
+	err := json.Unmarshal(b, &f)
+	return f, err
 }
 
 // memberError is a fixture member that holds a value the verifier cannot
@@ -248,32 +243,39 @@ type memberError struct {
 
 func (e *memberError) Error() string { return e.member + ": " + e.problem }
 
-// verifierStateArrays names the verifierState members that hold an array, in
-// the order checkVerifierState checks them, each with the JSON type of its
-// entries; a string entry must also not be empty. The Python verifier's
-// _VERIFIER_STATE_ARRAYS holds the same names in the same order, with the
-// same entry types.
-var verifierStateArrays = []struct{ name, entry string }{
-	{"agentBindings", "an object"},
-	{"seenNonces", "a string"},
-	{"trustedIssuers", "a string"},
+// verifierStateArrays names the verifierState members that hold an array,
+// each with the JSON type of its entries; a string entry must also not be
+// empty, and an object entry's agentBindingMembers are strings. The Python
+// verifier's _VERIFIER_STATE_ARRAYS holds the same names with the same entry
+// types.
+var verifierStateArrays = map[string]string{
+	"agentBindings":  "an object",
+	"seenNonces":     "a string",
+	"trustedIssuers": "a string",
 }
+
+// agentBindingMembers names the members of a verifierState.agentBindings
+// entry, each a string, in the order checkArrayMember checks them. The
+// Python verifier's _AGENT_BINDING_MEMBERS holds the same names in the same
+// order.
+var agentBindingMembers = []string{"agentDid", "algorithm", "publicKeyHex"}
 
 // checkVerifierState returns a *memberError naming the verifierState of a
 // challengeResponse fixture in raw when raw writes none or writes one that is
 // not an object, such as null or [], and the verifierState of a fixture of
 // another fixtureType when raw writes one that is neither an object nor null,
 // such as 0 or [], which encoding/json would fail to decode into a
-// VerifierState. Otherwise it names the first verifierStateArrays member of
-// the verifierState object that holds a value that is not an array or null,
-// such as 0, false, "" or {}, or the first entry of one that is not of the
-// member's entry type, null included, or is the empty string, named as in
-// verifierState.seenNonces[1]. The members are checked in the order of
-// verifierStateArrays, the entries of each after its value. Each value and
-// entry is read from raw: encoding/json decodes a null entry into the empty
-// string or the zero AgentBinding, and an empty string as written, with no
-// error. It returns nil when there is none, or when raw is not an object,
-// which the decode reports.
+// VerifierState. Otherwise it names the first member or entry of the
+// verifierState object that the load rule refuses, checking the members in
+// the order of their names: agentBindings (checkArrayMember), then
+// clockRfc3339, which must be a string when it is written, and written in a
+// challengeResponse fixture (stringMember), then seenNonces and
+// trustedIssuers (checkArrayMember). Each value and entry is read from raw:
+// encoding/json decodes a null entry into the empty string or the zero
+// AgentBinding, a missing or null member into the zero value and an empty
+// string as written, with no error, and fails on a value of another type
+// with a line of its own. It returns nil when there is none, or when raw is
+// not an object, which the decode reports.
 func checkVerifierState(raw []byte) error {
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(raw, &doc) != nil {
@@ -294,24 +296,72 @@ func checkVerifierState(raw []byte) error {
 	if json.Unmarshal(state, &vs) != nil {
 		return nil
 	}
-	for _, array := range verifierStateArrays {
-		value, ok := vs[array.name]
-		if !ok {
-			continue
+	if err := checkArrayMember(vs, "agentBindings"); err != nil {
+		return err
+	}
+	if _, ok := vs["clockRfc3339"]; ok || challengeResponse {
+		if err := stringMember(vs, "verifierState", "clockRfc3339"); err != nil {
+			return err
 		}
-		if kind := jsonType(value); kind != "an array" && kind != "null" {
-			return &memberError{"verifierState." + array.name, kind + ", not an array"}
+	}
+	if err := checkArrayMember(vs, "seenNonces"); err != nil {
+		return err
+	}
+	return checkArrayMember(vs, "trustedIssuers")
+}
+
+// checkArrayMember returns a *memberError naming verifierState.name when the
+// verifierState object vs holds a value there that is not an array or null,
+// such as 0, false, "" or {}; otherwise naming the first entry of the array
+// that is not of the verifierStateArrays entry type, null included, or is
+// the empty string, as in verifierState.seenNonces[1]; otherwise naming the
+// first agentBindingMembers member of an agentBindings entry that is missing
+// or is not a string, as in verifierState.agentBindings[0].agentDid, the
+// members of each entry checked before the next entry. A missing or null
+// member holds no entry. It returns nil when there is none.
+func checkArrayMember(vs map[string]json.RawMessage, name string) error {
+	value, ok := vs[name]
+	if !ok {
+		return nil
+	}
+	if kind := jsonType(value); kind != "an array" && kind != "null" {
+		return &memberError{"verifierState." + name, kind + ", not an array"}
+	}
+	entries, _ := arrayElements(value)
+	for i, entry := range entries {
+		member := fmt.Sprintf("verifierState.%s[%d]", name, i)
+		if kind := jsonType(entry); kind != verifierStateArrays[name] {
+			return &memberError{member, kind + ", not " + verifierStateArrays[name]}
 		}
-		entries, _ := arrayElements(value)
-		for i, entry := range entries {
-			member := fmt.Sprintf("verifierState.%s[%d]", array.name, i)
-			if kind := jsonType(entry); kind != array.entry {
-				return &memberError{member, kind + ", not " + array.entry}
+		if string(bytes.TrimSpace(entry)) == `""` {
+			return &memberError{member, "an empty string"}
+		}
+		if name == "agentBindings" {
+			var binding map[string]json.RawMessage
+			if err := json.Unmarshal(entry, &binding); err != nil {
+				return err
 			}
-			if string(bytes.TrimSpace(entry)) == `""` {
-				return &memberError{member, "an empty string"}
+			for _, field := range agentBindingMembers {
+				if err := stringMember(binding, member, field); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	return nil
+}
+
+// stringMember returns a *memberError naming label.name when the JSON object
+// members writes no member name, or writes one that is not a string, null
+// included, as in verifierState.agentBindings[0].agentDid: missing. It
+// returns nil when the member is a string.
+func stringMember(members map[string]json.RawMessage, label, name string) error {
+	value, ok := members[name]
+	if !ok {
+		return &memberError{label + "." + name, "missing"}
+	}
+	if kind := jsonType(value); kind != "a string" {
+		return &memberError{label + "." + name, kind + ", not a string"}
 	}
 	return nil
 }
@@ -336,49 +386,6 @@ func jsonType(raw json.RawMessage) string {
 		return "an object"
 	}
 	return "a number"
-}
-
-// markClockProblem sets clockRFC3339Problem on vs, the verifierState decoded
-// from raw without error, when raw writes verifierState as an object that
-// leaves out its clockRfc3339 member or writes it as null. The Python
-// verifier's FixtureError names the same two problems.
-func markClockProblem(raw []byte, vs *VerifierState) {
-	var written struct {
-		VerifierState map[string]json.RawMessage `json:"verifierState"`
-	}
-	if json.Unmarshal(raw, &written) != nil || written.VerifierState == nil {
-		return
-	}
-	if value, ok := written.VerifierState["clockRfc3339"]; !ok {
-		vs.clockRFC3339Problem = "missing"
-	} else if string(value) == "null" {
-		vs.clockRFC3339Problem = "null, not a string"
-	}
-}
-
-// markPublicKeyHexProblems sets publicKeyHexProblem on each entry of
-// bindings, the verifierState.agentBindings decoded from raw without error,
-// whose publicKeyHex member raw leaves out or writes as null. The Python
-// verifier's FixtureError names the same two problems.
-func markPublicKeyHexProblems(raw []byte, bindings []AgentBinding) {
-	var written struct {
-		VerifierState struct {
-			AgentBindings []map[string]json.RawMessage `json:"agentBindings"`
-		} `json:"verifierState"`
-	}
-	if json.Unmarshal(raw, &written) != nil {
-		return
-	}
-	for i, entry := range written.VerifierState.AgentBindings {
-		if i == len(bindings) {
-			break
-		}
-		if value, ok := entry["publicKeyHex"]; !ok {
-			bindings[i].publicKeyHexProblem = "missing"
-		} else if string(value) == "null" {
-			bindings[i].publicKeyHexProblem = "null, not a string"
-		}
-	}
 }
 
 // repeatedMember returns the first member name, in document order, that a
@@ -853,10 +860,10 @@ type result struct {
 //  5. The challenge body's issuerDid is in verifierState.trustedIssuers
 //
 // The first failing check wins; subsequent checks are not performed. When the
-// agentBindings entry check 2 reads has no publicKeyHex, or a null one, or
-// the verifierState.clockRfc3339 check 3 reads is missing, null or a string
-// parseRFC3339 does not read, the result is a fixtureError naming that
-// member instead of a verdict.
+// verifierState.clockRfc3339 check 3 reads is a string parseRFC3339 does not
+// read, the result is a fixtureError naming that member instead of a
+// verdict; checkVerifierState refuses the other verifierState values the
+// checks cannot use before the fixture reaches them.
 func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	// (1) The response echoes the challenge body, whose canonical payload the
 	// signature covers, and the signature verifies
@@ -902,16 +909,13 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	}
 
 	// (2) publicKey matches the key bound to challenge.agentDid
-	bound, entry, found := lookupAgentBinding(vs, cr.Challenge.AgentDID)
+	bound, found := lookupAgentBinding(vs, cr.Challenge.AgentDID)
 	if !found {
 		return result{
 			verdict:        "REJECT",
 			rejectCategory: "UNTRUSTED_KEY",
 			reason:         fmt.Sprintf("challenge.agentDid %s has no agentBinding in verifierState", strconv.QuoteToASCII(cr.Challenge.AgentDID)),
 		}
-	}
-	if bound.publicKeyHexProblem != "" {
-		return result{fixtureError: entry + ".publicKeyHex: " + bound.publicKeyHexProblem}
 	}
 	boundPubHex := hex.EncodeToString(pubBytes)
 	if boundPubHex != bound.PublicKeyHex {
@@ -923,9 +927,6 @@ func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	}
 
 	// (3) Challenge not expired
-	if vs.clockRFC3339Problem != "" {
-		return result{fixtureError: "verifierState.clockRfc3339: " + vs.clockRFC3339Problem}
-	}
 	clock, err := parseRFC3339(vs.ClockRFC3339)
 	if err != nil {
 		return result{fixtureError: fmt.Sprintf("verifierState.clockRfc3339: cannot be read as a date-time (%v)", err)}
@@ -992,15 +993,14 @@ func trustedIssuer(vs VerifierState, issuerDID string) bool {
 }
 
 // lookupAgentBinding returns the first verifierState.agentBindings entry whose
-// agentDid is agentDID, and the member name of that entry, as in
-// verifierState.agentBindings[0].
-func lookupAgentBinding(vs VerifierState, agentDID string) (AgentBinding, string, bool) {
-	for i, b := range vs.AgentBindings {
+// agentDid is agentDID, and whether there is one.
+func lookupAgentBinding(vs VerifierState, agentDID string) (AgentBinding, bool) {
+	for _, b := range vs.AgentBindings {
 		if b.AgentDID == agentDID {
-			return b, fmt.Sprintf("verifierState.agentBindings[%d]", i), true
+			return b, true
 		}
 	}
-	return AgentBinding{}, "", false
+	return AgentBinding{}, false
 }
 
 // ---------------------------------------------------------------------------

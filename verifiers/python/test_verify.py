@@ -5,10 +5,12 @@ whose verifierState the checks cannot use, or whose top-level value is not
 a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
 that is not an array or null is a fixture error, as is an agentBindings
-entry that is not an object, a seenNonces or trustedIssuers entry that is
-not a non-empty string, a challengeResponse fixture with no verifierState
-object and a fixture of another fixtureType whose verifierState is neither
-an object nor null, a timestamp with no UTC
+entry that is not an object, an agentBindings entry's agentDid, algorithm or
+publicKeyHex or a clockRfc3339 that is missing or is not a string, a
+seenNonces or trustedIssuers entry that is not a non-empty string, a
+challengeResponse fixture with no verifierState object and a fixture of
+another fixtureType whose verifierState is neither an object nor null, a
+timestamp with no UTC
 offset is not read in the machine's local time zone, a timestamp is read,
 signed and compared as the Go verifier reads, signs and compares it, and
 the walk that looks for a repeated member name stays within a memory bound
@@ -417,13 +419,14 @@ class UnreadableFixtureTest(unittest.TestCase):
 
     def test_signature_reject_does_not_read_verifier_state(self) -> None:
         """The signature check runs before any check reads a verifierState
-        member, so a null clockRfc3339 under a signature that does not
-        verify keeps the REJECT [SIGNATURE_INVALID] verdict. A verifierState
-        that is not an object fails the fixture before any check
-        (VerifierStateObjectTest)."""
+        member, so a clockRfc3339 the verifier does not read as a date-time
+        under a signature that does not verify keeps the REJECT
+        [SIGNATURE_INVALID] verdict. A verifierState the load rule refuses, a
+        null clockRfc3339 included, fails the fixture before any check
+        (VerifierStateObjectTest, AgentBindingMemberTest)."""
 
         def edit(d: dict) -> None:
-            d["verifierState"]["clockRfc3339"] = None
+            d["verifierState"]["clockRfc3339"] = "tomorrow"
             d["challengeResponse"]["challenge"]["issuedAt"] = "2026-05-27T23:59:00Z"
             d["challengeResponse"]["response"]["issuedAt"] = "2026-05-27T23:59:00Z"
             d["expected"] = {"verifyResult": "REJECT", "rejectCategory": "SIGNATURE_INVALID"}
@@ -1611,6 +1614,254 @@ class VerifierStateEntryTest(unittest.TestCase):
         for name, value, line in cases:
             with self.subTest(name):
                 vs = dict(doc["verifierState"], **{name: value})
+                with self.assertRaises(verify.FixtureError) as raised:
+                    verify.verify_challenge_response(doc["challengeResponse"], vs)
+                self.assertEqual(str(raised.exception), line)
+
+
+class AgentBindingMemberTest(unittest.TestCase):
+    """Each verifierState.agentBindings entry must hold an agentDid, an
+    algorithm and a publicKeyHex, each a string, and a
+    verifierState.clockRfc3339 that is written must be a string, which a
+    challengeResponse fixture must write. Anything else, null included, fails
+    the fixture when it loads, so before the signature check and for every
+    fixture type, with one line naming the first such member: the members of
+    an entry in the order agentDid, algorithm, publicKeyHex, each entry
+    before the next, agentBindings before clockRfc3339, and clockRfc3339
+    before seenNonces and trustedIssuers. A string is read as written: an
+    agentDid no challenge names binds nothing, a clockRfc3339 the verifier
+    does not read as a date-time fails the fixture when the expiry check
+    reads it, and a trustScoreComposition fixture reads neither. The cases
+    are built from the valid fixture, and some from a trustScoreComposition
+    fixture. ../go/verify_test.go builds the same cases and expects the same
+    lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        doc = json.loads(self.text)
+        self.agent = doc["challengeResponse"]["challenge"]["agentDid"]
+        self.clock = doc["verifierState"]["clockRfc3339"]
+        entries = doc["verifierState"]["agentBindings"]
+        self.assertEqual([e["agentDid"] for e in entries], [self.agent])
+        self.entry = entries[0]
+
+    def bound(self, members: dict | None = None, *unset: str) -> dict:
+        """A copy of the bound entry with members added or replaced and the
+        members named in unset removed."""
+        entry = dict(self.entry, **(members or {}))
+        for name in unset:
+            del entry[name]
+        return entry
+
+    def with_entries(self, *entries: object, **members: object) -> str:
+        """The valid fixture with agentBindings holding the entries and the
+        other verifierState members set."""
+        return edited(self.text, lambda d: d["verifierState"].update(agentBindings=list(entries), **members))
+
+    def with_state(self, **members: object) -> str:
+        return edited(self.text, lambda d: d["verifierState"].update(members))
+
+    def without_clock(self, text: str) -> str:
+        return edited(text, lambda d: d["verifierState"].pop("clockRfc3339"))
+
+    @staticmethod
+    def bad_signature(text: str) -> str:
+        """text with a later issuedAt in the challenge body and in the
+        response's echo of it, which keeps the echo and is a signature that
+        does not verify."""
+
+        def edit(d: dict) -> None:
+            for body in d["challengeResponse"].values():
+                body["issuedAt"] = "2026-05-27T23:59:00Z"
+
+        return edited(text, edit)
+
+    @staticmethod
+    def expecting(text: str, category: str) -> str:
+        return edited(text, lambda d: d.update(expected={"verifyResult": "REJECT", "rejectCategory": category}))
+
+    @staticmethod
+    def entry_line(index: int, member: str, problem: str) -> str:
+        return f"fixture error: verifierState.agentBindings[{index}].{member}: {problem}"
+
+    @staticmethod
+    def clock_line(problem: str) -> str:
+        return f"fixture error: verifierState.clockRfc3339: {problem}"
+
+    def assert_fixture_error(self, text: str, line: str) -> None:
+        path, code, out, err = run_text(text)
+        self.assertEqual(out, fail_block(path, line))
+        self.assertEqual(err, "")
+        self.assertEqual(code, 1)
+
+    def test_member_missing_or_not_a_string_is_a_fixture_error(self) -> None:
+        values = [
+            ("null", None, "null"), ("7", 7, "a number"), ("true", True, "a boolean"),
+            ("empty array", [], "an array"), ("empty object", {}, "an object"),
+        ]
+        cases = []
+        for member in ("agentDid", "algorithm", "publicKeyHex"):
+            cases.append((f"no {member}", self.with_entries(self.bound(None, member)), self.entry_line(0, member, "missing")))
+            for label, value, kind in values:
+                cases.append((
+                    f"{member} {label}",
+                    self.with_entries(self.bound({member: value})),
+                    self.entry_line(0, member, f"{kind}, not a string"),
+                ))
+        clocks = [
+            ("null", None, "null"), ("7", 7, "a number"), ("false", False, "a boolean"),
+            ("empty array", [], "an array"), ("empty object", {}, "an object"),
+            ("the clock in an array", [self.clock], "an array"),
+        ]
+        for label, value, kind in clocks:
+            cases.append((f"clockRfc3339 {label}", self.with_state(clockRfc3339=value), self.clock_line(f"{kind}, not a string")))
+        cases.append(("no clockRfc3339", self.without_clock(self.text), self.clock_line("missing")))
+        for name, text, line in cases:
+            with self.subTest(name):
+                self.assert_fixture_error(text, line)
+
+    def test_line_names_the_first_member_the_rule_refuses(self) -> None:
+        composition = COMPOSITION.read_text(encoding="utf-8")
+        cases = [
+            (
+                "AgentDid in place of agentDid",
+                self.with_entries(self.bound({"AgentDid": self.agent}, "agentDid")),
+                self.entry_line(0, "agentDid", "missing"),
+            ),
+            (
+                "agentDid 7 and publicKeyHex 7",
+                self.with_entries(self.bound({"agentDid": 7, "publicKeyHex": 7})),
+                self.entry_line(0, "agentDid", "a number, not a string"),
+            ),
+            (
+                "no algorithm and publicKeyHex null",
+                self.with_entries(self.bound({"publicKeyHex": None}, "algorithm")),
+                self.entry_line(0, "algorithm", "missing"),
+            ),
+            (
+                "the bound entry before an entry whose agentDid is 7",
+                self.with_entries(self.bound(), self.bound({"agentDid": 7})),
+                self.entry_line(1, "agentDid", "a number, not a string"),
+            ),
+            (
+                "an entry with no agentDid before a null entry",
+                self.with_entries(self.bound(None, "agentDid"), None),
+                self.entry_line(0, "agentDid", "missing"),
+            ),
+            (
+                "an entry with no agentDid and clockRfc3339 7",
+                self.with_entries(self.bound(None, "agentDid"), clockRfc3339=7),
+                self.entry_line(0, "agentDid", "missing"),
+            ),
+            (
+                "clockRfc3339 7 and a seenNonces entry null",
+                self.with_state(clockRfc3339=7, seenNonces=[None]),
+                self.clock_line("a number, not a string"),
+            ),
+            (
+                "clockRfc3339 null and trustedIssuers 0",
+                self.with_state(clockRfc3339=None, trustedIssuers=0),
+                self.clock_line("null, not a string"),
+            ),
+            (
+                "agentDid 7 under a signature that does not verify",
+                self.bad_signature(self.with_entries(self.bound({"agentDid": 7}))),
+                self.entry_line(0, "agentDid", "a number, not a string"),
+            ),
+            (
+                "clockRfc3339 null under a signature that does not verify",
+                self.bad_signature(self.with_state(clockRfc3339=None)),
+                self.clock_line("null, not a string"),
+            ),
+            (
+                "no clockRfc3339 under a signature that does not verify",
+                self.bad_signature(self.without_clock(self.text)),
+                self.clock_line("missing"),
+            ),
+            (
+                "algorithm 7 in a trustScoreComposition fixture",
+                append_member(composition, '"verifierState": {"agentBindings": [{"agentDid": ' + json.dumps(self.agent) + ', "algorithm": 7}]}'),
+                self.entry_line(0, "algorithm", "a number, not a string"),
+            ),
+            (
+                "clockRfc3339 7 in a trustScoreComposition fixture",
+                append_member(composition, '"verifierState": {"clockRfc3339": 7}'),
+                self.clock_line("a number, not a string"),
+            ),
+            (
+                "clockRfc3339 null in a trustScoreComposition fixture",
+                append_member(composition, '"verifierState": {"clockRfc3339": null}'),
+                self.clock_line("null, not a string"),
+            ),
+        ]
+        for name, text, line in cases:
+            with self.subTest(name):
+                self.assert_fixture_error(text, line)
+
+    def test_string_is_read_as_written(self) -> None:
+        accepted = f"signature: ed25519=true (verified against agentDid \"{self.agent}\" bound key)"
+        no_binding = f"challenge.agentDid \"{self.agent}\" has no agentBinding in verifierState"
+        cases = [
+            (
+                "agentDid empty",
+                self.expecting(self.with_entries(self.bound({"agentDid": ""})), "UNTRUSTED_KEY"),
+                "UNTRUSTED_KEY",
+                no_binding,
+            ),
+            ("algorithm empty", self.with_entries(self.bound({"algorithm": ""})), "", accepted),
+            (
+                "a signature that does not verify, with clockRfc3339 tomorrow",
+                self.expecting(self.bad_signature(self.with_state(clockRfc3339="tomorrow")), "SIGNATURE_INVALID"),
+                "SIGNATURE_INVALID",
+                "Ed25519 signature did not verify against the canonical 5-field payload",
+            ),
+        ]
+        for name, text, category, line in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, category, line))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+        composition = COMPOSITION.read_text(encoding="utf-8")
+        _, shipped_code, shipped, _ = run_text(composition)
+        self.assertTrue(shipped.startswith("PASS  "), shipped)
+        self.assertEqual(shipped_code, 0)
+        block = shipped.split("\n", 1)[1]
+        compositions = (
+            (
+                "a trustScoreComposition fixture with a verifierState that writes no clockRfc3339",
+                append_member(composition, '"verifierState": {}'),
+            ),
+            (
+                "a trustScoreComposition fixture with clockRfc3339 tomorrow",
+                append_member(composition, '"verifierState": {"clockRfc3339": "tomorrow"}'),
+            ),
+            (
+                "a trustScoreComposition fixture with an entry whose members are empty",
+                append_member(composition, '"verifierState": {"agentBindings": [{"agentDid": "", "algorithm": "", "publicKeyHex": ""}]}'),
+            ),
+        )
+        for name, text in compositions:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, f"PASS  {path}\n" + block)
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_checks_called_directly_raise_for_the_member(self) -> None:
+        doc = json.loads(self.text)
+        cases = (
+            (lambda vs: vs.update(agentBindings=[self.bound(None, "agentDid")]), "verifierState.agentBindings[0].agentDid: missing"),
+            (lambda vs: vs.update(agentBindings=[self.bound({"publicKeyHex": 7})]), "verifierState.agentBindings[0].publicKeyHex: a number, not a string"),
+            (lambda vs: vs.update(clockRfc3339=7), "verifierState.clockRfc3339: a number, not a string"),
+            (lambda vs: vs.update(clockRfc3339=None), "verifierState.clockRfc3339: null, not a string"),
+            (lambda vs: vs.pop("clockRfc3339"), "verifierState.clockRfc3339: missing"),
+        )
+        for edit, line in cases:
+            with self.subTest(line):
+                vs = dict(doc["verifierState"])
+                edit(vs)
                 with self.assertRaises(verify.FixtureError) as raised:
                     verify.verify_challenge_response(doc["challengeResponse"], vs)
                 self.assertEqual(str(raised.exception), line)

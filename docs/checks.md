@@ -72,20 +72,33 @@ and a `trustedIssuers`, `agentBindings` or `seenNonces` member of
 missing member read as the empty array).
 
 Both reference verifiers also refuse to load a `challengeResponse` fixture
-with no `verifierState` object, a fixture of another type whose
-`verifierState` is neither an object nor null, and a fixture of any type
-whose `verifierState` holds an `agentBindings` entry that is not an object,
-or a `seenNonces` or `trustedIssuers` entry that is not a non-empty string,
-null included; no file here pins those rules. The line names
-`verifierState`, or the first such entry, with the members checked in the
-order `agentBindings`, `seenNonces`, `trustedIssuers`. For the valid fixture
-with one edit, both print:
+with no `verifierState` object or whose `verifierState` writes no
+`clockRfc3339`, a fixture of another type whose `verifierState` is neither
+an object nor null, and a fixture of any type whose `verifierState` holds an
+`agentBindings` entry that is not an object, an `agentBindings` entry whose
+`agentDid`, `algorithm` or `publicKeyHex` is missing or is not a string, a
+`clockRfc3339` that is not a string, or a `seenNonces` or `trustedIssuers`
+entry that is not a non-empty string, null included; no file here pins
+those rules. The line names `verifierState`, or the first such member or
+entry, with the members checked in the order `agentBindings`,
+`clockRfc3339`, `seenNonces`, `trustedIssuers`, the entries of an array
+after its value, and the members of an `agentBindings` entry, in the order
+`agentDid`, `algorithm`, `publicKeyHex`, before the next entry. A
+`clockRfc3339` string loads as written; one that is not a date-time of the
+form both verifiers read fails the fixture when the expiry check reads it
+([how it works](how-it-works.md)). For the valid fixture with one edit,
+both print:
 
 | Edit | Line both verifiers print |
 |---|---|
 | no `verifierState` member | `fixture error: verifierState: missing` |
 | `verifierState` set to `null` | `fixture error: verifierState: null, not an object` |
 | `agentBindings` set to `[null, <the bound entry>]` | `fixture error: verifierState.agentBindings[0]: null, not an object` |
+| the bound entry's `agentDid` removed | `fixture error: verifierState.agentBindings[0].agentDid: missing` |
+| the bound entry's `algorithm` set to `7` | `fixture error: verifierState.agentBindings[0].algorithm: a number, not a string` |
+| the bound entry's `publicKeyHex` set to `null` | `fixture error: verifierState.agentBindings[0].publicKeyHex: null, not a string` |
+| no `clockRfc3339` member | `fixture error: verifierState.clockRfc3339: missing` |
+| `clockRfc3339` set to `7` | `fixture error: verifierState.clockRfc3339: a number, not a string` |
 | `seenNonces` set to `[null, ""]` | `fixture error: verifierState.seenNonces[0]: null, not a string` |
 | `trustedIssuers` set to `["did:opena2a:authority:opena2a.org", 5]` | `fixture error: verifierState.trustedIssuers[1]: a number, not a string` |
 | `trustedIssuers` set to `["", "did:opena2a:authority:opena2a.org"]` | `fixture error: verifierState.trustedIssuers[0]: an empty string` |

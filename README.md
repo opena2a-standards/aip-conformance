@@ -71,12 +71,14 @@ rejection category matches (when declared). Outside the two §5.1 bodies
 a fixture's members under their exact names (`VerifierState` is not
 `verifierState`), and a fixture that writes one member name twice in the
 same JSON object fails to load, as does a `challengeResponse` fixture with
-no `verifierState` object, a fixture of another type whose `verifierState`
-is neither an object nor null, and one whose `verifierState` holds a
-`trustedIssuers`, `agentBindings` or `seenNonces` member that is neither an
-array nor null, an `agentBindings` entry that is not an object, or a
-`seenNonces` or `trustedIssuers` entry that is not a non-empty string; each
-counts as a fail (exit code 1).
+no `verifierState` object or no `clockRfc3339` in it, a fixture of another
+type whose `verifierState` is neither an object nor null, and one whose
+`verifierState` holds a `trustedIssuers`, `agentBindings` or `seenNonces`
+member that is neither an array nor null, an `agentBindings` entry that is
+not an object, an `agentBindings` entry whose `agentDid`, `algorithm` or
+`publicKeyHex` is missing or not a string, a `clockRfc3339` that is not a
+string, or a `seenNonces` or `trustedIssuers` entry that is not a non-empty
+string; each counts as a fail (exit code 1).
 [`fixtures/load-errors/`](./fixtures/load-errors) holds pinned examples
 that a conforming verifier refuses to load
 ([lines](docs/checks.md#load-error-fixtures)).
