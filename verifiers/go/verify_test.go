@@ -1671,10 +1671,10 @@ func TestVerifierStateArrayEntryOfAnotherTypeIsAFixtureError(t *testing.T) {
 // writes no verifierState member, or one that is not an object, null
 // included, fails the fixture when it loads, so before the signature check
 // and before its challengeResponse member is read, with one line naming
-// verifierState. A trustScoreComposition fixture needs no verifierState, and
-// a null one is read as none. The cases are built from the valid fixture and
-// a trustScoreComposition fixture. ../python/test_verify.py builds the same
-// cases and expects the same lines.
+// verifierState. A trustScoreComposition fixture needs no verifierState, a
+// null one is read as none, and one with an empty object passes too. The
+// cases are built from the valid fixture and a trustScoreComposition fixture.
+// ../python/test_verify.py builds the same cases and expects the same lines.
 func TestChallengeResponseFixtureWithoutAVerifierStateObjectIsAFixtureError(t *testing.T) {
 	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
 	if err != nil {
@@ -1740,6 +1740,7 @@ func TestChallengeResponseFixtureWithoutAVerifierStateObjectIsAFixtureError(t *t
 	for _, tc := range []struct{ name, doc string }{
 		{"a trustScoreComposition fixture with no verifierState", string(composition)},
 		{"a trustScoreComposition fixture with verifierState null", appendMember(t, string(composition), `"verifierState": null`)},
+		{"a trustScoreComposition fixture with verifierState {}", appendMember(t, string(composition), `"verifierState": {}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, code, out := runText(t, tc.doc)
@@ -1749,6 +1750,66 @@ func TestChallengeResponseFixtureWithoutAVerifierStateObjectIsAFixtureError(t *t
 			}
 		})
 	}
+}
+
+// TestVerifierStateOfAnotherFixtureTypeThatIsNotAnObjectOrNullIsAFixtureError:
+// in a fixture of a fixtureType other than challengeResponse, a verifierState
+// that is neither an object nor null fails the fixture when it loads, so
+// before its trustScoreComposition member is read, with one line naming
+// verifierState; a null one is read as none. The cases are built from a
+// trustScoreComposition fixture, two of them with its fixtureType changed to
+// a type this verifier skips. ../python/test_verify.py builds the same cases
+// and expects the same lines.
+func TestVerifierStateOfAnotherFixtureTypeThatIsNotAnObjectOrNullIsAFixtureError(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/trust-score-measured-at-included-weight-0.50.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	composition := string(raw)
+	if strings.Contains(composition, `"verifierState"`) {
+		t.Fatal("the trustScoreComposition fixture writes a verifierState")
+	}
+	withState := func(text, value string) string {
+		return appendMember(t, text, `"verifierState": `+value)
+	}
+	payload := memberText(t, composition, "trustScoreComposition")
+	noPayload := strings.Replace(composition, ",\n  "+payload, "", 1)
+	if noPayload == composition {
+		t.Fatal("the trustScoreComposition fixture does not write trustScoreComposition after another member")
+	}
+	fixtureType := `"fixtureType": "trustScoreComposition"`
+	otherType := strings.Replace(composition, fixtureType, `"fixtureType": "otherType"`, 1)
+	if otherType == composition {
+		t.Fatalf("the trustScoreComposition fixture does not write %s", fixtureType)
+	}
+
+	cases := []struct{ name, doc, line string }{
+		{"verifierState 0", withState(composition, "0"), "fixture error: verifierState: a number, not an object"},
+		{"verifierState false", withState(composition, "false"), "fixture error: verifierState: a boolean, not an object"},
+		{`verifierState "x"`, withState(composition, `"x"`), "fixture error: verifierState: a string, not an object"},
+		{"verifierState []", withState(composition, "[]"), "fixture error: verifierState: an array, not an object"},
+		{"verifierState 0 and no trustScoreComposition", withState(noPayload, "0"),
+			"fixture error: verifierState: a number, not an object"},
+		{"verifierState 0 in a fixture of a type this verifier skips", withState(otherType, "0"),
+			"fixture error: verifierState: a number, not an object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := failBlock(path, tc.line); code != 1 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+
+	t.Run("verifierState null in a fixture of a type this verifier skips", func(t *testing.T) {
+		path, code, out := runText(t, withState(otherType, "null"))
+		want := "SKIP  " + path + "\n       fixtureType=otherType (this verifier handles challengeResponse and trustScoreComposition)\n" +
+			"\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+		if code != 0 || out != want {
+			t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+		}
+	})
 }
 
 // loadErrorLines is the line both verifiers print for each fixture under

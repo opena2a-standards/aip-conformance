@@ -72,13 +72,14 @@ and a `trustedIssuers`, `agentBindings` or `seenNonces` member of
 missing member read as the empty array).
 
 Both reference verifiers also refuse to load a `challengeResponse` fixture
-with no `verifierState` object, and a fixture of any type whose
-`verifierState` holds an `agentBindings` entry that is not an object, or a
-`seenNonces` or `trustedIssuers` entry that is not a non-empty string, null
-included; no file here pins those rules. The line names `verifierState`, or
-the first such entry, with the members checked in the order
-`agentBindings`, `seenNonces`, `trustedIssuers`. For the valid fixture with
-one edit, both print:
+with no `verifierState` object, a fixture of another type whose
+`verifierState` is neither an object nor null, and a fixture of any type
+whose `verifierState` holds an `agentBindings` entry that is not an object,
+or a `seenNonces` or `trustedIssuers` entry that is not a non-empty string,
+null included; no file here pins those rules. The line names
+`verifierState`, or the first such entry, with the members checked in the
+order `agentBindings`, `seenNonces`, `trustedIssuers`. For the valid fixture
+with one edit, both print:
 
 | Edit | Line both verifiers print |
 |---|---|
@@ -88,6 +89,11 @@ one edit, both print:
 | `seenNonces` set to `[null, ""]` | `fixture error: verifierState.seenNonces[0]: null, not a string` |
 | `trustedIssuers` set to `["did:opena2a:authority:opena2a.org", 5]` | `fixture error: verifierState.trustedIssuers[1]: a number, not a string` |
 | `trustedIssuers` set to `["", "did:opena2a:authority:opena2a.org"]` | `fixture error: verifierState.trustedIssuers[0]: an empty string` |
+
+The `trust-score-measured-at-included-weight-0.50` fixture writes no
+`verifierState`. With a `verifierState` member of `0` added, both print
+`fixture error: verifierState: a number, not an object`; with one of `null`
+added, both print the fixture's `MEASURED` result.
 
 ## §6.1 trust-score composition fixtures
 

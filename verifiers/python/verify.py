@@ -24,12 +24,13 @@ the member:
            fixture error: verifierState.agentBindings[0].agentDid: missing
 
 A challengeResponse fixture whose verifierState is missing or is not an
-object, and a fixture of any fixtureType whose verifierState is an object
-holding an agentBindings, seenNonces or trustedIssuers that is not an array
-or null, an agentBindings entry that is not an object, or a seenNonces or
-trustedIssuers entry that is not a non-empty string, null included, prints
-that FAIL block before any check runs, with the line the Go verifier prints
-for it:
+object, a fixture of another fixtureType whose verifierState is neither an
+object nor null, and a fixture of any fixtureType whose verifierState is an
+object holding an agentBindings, seenNonces or trustedIssuers that is not an
+array or null, an agentBindings entry that is not an object, or a seenNonces
+or trustedIssuers entry that is not a non-empty string, null included,
+prints that FAIL block before any check runs, with the line the Go verifier
+prints for it:
 
     FAIL  <path>
            fixture error: verifierState.seenNonces: a number, not an array
@@ -126,15 +127,18 @@ class FixtureError(ValueError):
     member named as _repeated_member names it, for example
     "verifierState.agentBindings[0].agentDid: missing". It is raised for a
     challengeResponse fixture whose verifierState is missing or is not an
-    object, and by the §5.1 checks for verifierState and for the
-    agentBindings, publicKeyHex, clockRfc3339, seenNonces and trustedIssuers
-    members they read from it and for the entries of the three arrays. The
-    checks read verifierState only after the signature check passes, except
-    that a challengeResponse fixture's verifierState that is missing or is
-    not an object, an agentBindings, seenNonces or trustedIssuers that is not
-    an array or null, an agentBindings entry that is not an object, and a
-    seenNonces or trustedIssuers entry that is not a non-empty string fail
-    the fixture before its checks run (_check_verifier_state)."""
+    object, for a fixture of another fixtureType whose verifierState is
+    neither an object nor null, and by the §5.1 checks for verifierState and
+    for the agentBindings, publicKeyHex, clockRfc3339, seenNonces and
+    trustedIssuers members they read from it and for the entries of the
+    three arrays. The checks read verifierState only after the signature
+    check passes, except that a challengeResponse fixture's verifierState
+    that is missing or is not an object, the verifierState of a fixture of
+    another fixtureType that is neither an object nor null, an
+    agentBindings, seenNonces or trustedIssuers that is not an array or
+    null, an agentBindings entry that is not an object, and a seenNonces or
+    trustedIssuers entry that is not a non-empty string fail the fixture
+    before its checks run (_check_verifier_state)."""
 
     def __init__(self, member: str, problem: str) -> None:
         super().__init__(f"{member}: {problem}")
@@ -345,18 +349,21 @@ def _array_member(vs: dict, name: str) -> list:
 def _check_verifier_state(f: dict) -> None:
     """FixtureError naming verifierState when f is a challengeResponse
     fixture that has no verifierState member or one that is not an object,
-    such as null or []. Otherwise, when verifierState is an object,
-    FixtureError naming the first of verifierState.agentBindings,
-    verifierState.seenNonces and verifierState.trustedIssuers, in that order,
-    that holds a value that is not an array or null, or the first entry of
-    one of them that _array_member refuses, each member's entries checked
-    after its value. It is checked before any other fixture check, for every
-    fixtureType, as the Go verifier's parseFixture checks it
-    (checkVerifierState)."""
+    such as null or [], or a fixture of another fixtureType whose
+    verifierState is neither an object nor null, such as 0 or [], which the
+    Go verifier's encoding/json would fail to decode. Otherwise, when
+    verifierState is an object, FixtureError naming the first of
+    verifierState.agentBindings, verifierState.seenNonces and
+    verifierState.trustedIssuers, in that order, that holds a value that is
+    not an array or null, or the first entry of one of them that
+    _array_member refuses, each member's entries checked after its value. It
+    is checked before any other fixture check, for every fixtureType, as the
+    Go verifier's parseFixture checks it (checkVerifierState)."""
     vs = f.get("verifierState")
-    if f.get("fixtureType") == "challengeResponse" and not isinstance(vs, dict):
-        if "verifierState" not in f:
-            raise FixtureError("verifierState", "missing")
+    challenge_response = f.get("fixtureType") == "challengeResponse"
+    if challenge_response and "verifierState" not in f:
+        raise FixtureError("verifierState", "missing")
+    if not isinstance(vs, dict) and (challenge_response or vs is not None):
         raise FixtureError("verifierState", f"{_json_type(vs)}, not an object")
     if isinstance(vs, dict):
         for name in _VERIFIER_STATE_ARRAYS:
