@@ -1812,6 +1812,51 @@ func TestVerifierStateOfAnotherFixtureTypeThatIsNotAnObjectOrNullIsAFixtureError
 	})
 }
 
+// TestSkipLineWritesTheFixtureTypeAsDecoded: a fixture whose fixtureType is
+// neither challengeResponse nor trustScoreComposition is skipped, which
+// counts as a pass, with one line that writes the fixtureType as
+// encoding/json decodes it into a string: a fixture with no fixtureType
+// member, one whose fixtureType is null and one that writes FixtureType in
+// its place each print the empty string, as does fixtureType "", and
+// fixtureType "otherType" prints otherType. The cases are built from the
+// valid fixture. ../python/test_verify.py builds the same cases and expects
+// the same lines.
+func TestSkipLineWritesTheFixtureTypeAsDecoded(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	member := memberText(t, doc, "fixtureType")
+	withType := func(value string) string {
+		return strings.Replace(doc, member, `"fixtureType": `+value, 1)
+	}
+	// The member and the line break and indentation after it.
+	without := strings.Replace(doc, member+",\n  ", "", 1)
+	if without == doc {
+		t.Fatal("the valid fixture does not write fixtureType before another member")
+	}
+
+	cases := []struct{ name, doc, fixtureType string }{
+		{"no fixtureType", without, ""},
+		{"fixtureType null", withType("null"), ""},
+		{"FixtureType in place of fixtureType",
+			strings.Replace(doc, member, `"FixtureType"`+strings.TrimPrefix(member, `"fixtureType"`), 1), ""},
+		{`fixtureType ""`, withType(`""`), ""},
+		{"fixtureType otherType", withType(`"otherType"`), "otherType"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			want := "SKIP  " + path + "\n       fixtureType=" + tc.fixtureType +
+				" (this verifier handles challengeResponse and trustScoreComposition)\n\nsummary: 1 pass, 0 fail (1 fixtures)\n"
+			if code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
 // loadErrorLines is the line both verifiers print for each fixture under
 // fixtures/load-errors/; ../python/test_verify.py holds the same lines.
 var loadErrorLines = map[string]string{

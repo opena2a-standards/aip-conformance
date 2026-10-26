@@ -18,7 +18,9 @@ response echoes must equal it, the bound-key and nonce checks read its
 agentDid and nonce, and the trusted-issuer check runs fifth. A signed field
 holding a character outside ASCII goes into the signed payload as its UTF-8
 bytes, as in the Go verifier, and a fixture file is read as UTF-8 under the
-C locale.
+C locale. A fixture whose fixtureType is missing, null, "" or "otherType"
+prints the SKIP line the Go verifier prints, with an empty fixtureType for
+the first three.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -1746,6 +1748,44 @@ class VerifierStateObjectTest(unittest.TestCase):
             )
             self.assertEqual(err, "")
             self.assertEqual(code, 0)
+
+
+class SkipLineTest(unittest.TestCase):
+    """A fixture whose fixtureType is neither challengeResponse nor
+    trustScoreComposition is skipped, which counts as a pass, with one line
+    that writes the fixtureType as the Go verifier's encoding/json reads it
+    into a string: a fixture with no fixtureType member, one whose
+    fixtureType is null and one that writes FixtureType in its place each
+    print the empty string, as does fixtureType "", and fixtureType
+    "otherType" prints otherType. The cases are built from the valid
+    fixture. ../go/verify_test.go builds the same cases and expects the same
+    lines."""
+
+    def test_skip_line_writes_the_fixture_type_as_go_reads_it(self) -> None:
+        text = VALID.read_text(encoding="utf-8")
+        member = member_text(text, "fixtureType")
+        cases = [
+            ("no fixtureType", edited(text, lambda d: d.pop("fixtureType")), ""),
+            ("fixtureType null", edited(text, lambda d: d.update(fixtureType=None)), ""),
+            (
+                "FixtureType in place of fixtureType",
+                text.replace(member, '"FixtureType"' + member.removeprefix('"fixtureType"')),
+                "",
+            ),
+            ('fixtureType ""', edited(text, lambda d: d.update(fixtureType="")), ""),
+            ("fixtureType otherType", edited(text, lambda d: d.update(fixtureType="otherType")), "otherType"),
+        ]
+        for name, fixture, fixture_type in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(fixture)
+                self.assertEqual(
+                    out,
+                    f"SKIP  {path}\n       fixtureType={fixture_type} "
+                    "(this verifier handles challengeResponse and trustScoreComposition)\n\n"
+                    "summary: 1 pass, 0 fail (1 fixtures)\n",
+                )
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
 
 
 # The line both verifiers print for each fixture under fixtures/load-errors/;

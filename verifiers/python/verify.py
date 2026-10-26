@@ -44,6 +44,14 @@ Any other error raised while checking a fixture prints a FAIL block with
 the error's type and message. Each of these counts as a fail, and the run
 goes on to the next fixture and prints the summary line.
 
+Any other fixture whose fixtureType is neither challengeResponse nor
+trustScoreComposition prints a SKIP block, which counts as a pass. Its line
+writes a missing or null fixtureType as the empty string, as the Go
+verifier's encoding/json reads it into a string, so both verifiers print
+
+    SKIP  <path>
+           fixtureType= (this verifier handles challengeResponse and trustScoreComposition)
+
 Canonical signing form (5 fields, pipe-delimited) -- MUST mirror
 scripts/generate-fixtures/main.go canonicalChallengeResponsePayload
 VERBATIM:
@@ -174,9 +182,9 @@ _ECHOED_FIELDS = ("challenge", "agentDid", "nonce", "issuedAt", "expiresAt")
 
 
 def _string_member(body: Any, name: str) -> Any:
-    """The member name of a §5.1 body as the Go verifier's encoding/json reads
-    it into a string field: a missing member and null read as the empty
-    string."""
+    """The member name of a §5.1 body, or of the fixture's top-level object,
+    as the Go verifier's encoding/json reads it into a string field: a
+    missing member and null read as the empty string."""
     value = body.get(name)
     return "" if value is None else value
 
@@ -721,7 +729,7 @@ def _check_fixture(path: Path, f: dict) -> bool:
     if f.get("fixtureType") == "trustScoreComposition":
         return run_composition(path, f)
     if f.get("fixtureType") != "challengeResponse":
-        print(f"SKIP  {path}\n       fixtureType={f.get('fixtureType')} (this verifier handles challengeResponse and trustScoreComposition)")
+        print(f"SKIP  {path}\n       fixtureType={_string_member(f, 'fixtureType')} (this verifier handles challengeResponse and trustScoreComposition)")
         return True
 
     if not f.get("challengeResponse"):
