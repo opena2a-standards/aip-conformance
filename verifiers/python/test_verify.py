@@ -6,8 +6,9 @@ a JSON object, prints one FAIL block, after which the run goes on to the
 next fixture, a verifierState agentBindings, seenNonces or trustedIssuers
 that is not an array or null is a fixture error, as is an agentBindings
 entry that is not an object, a seenNonces or trustedIssuers entry that is
-not a non-empty string and a challengeResponse fixture with no verifierState
-object, a timestamp with no UTC
+not a non-empty string, a challengeResponse fixture with no verifierState
+object and a fixture of another fixtureType whose verifierState is neither
+an object nor null, a timestamp with no UTC
 offset is not read in the machine's local time zone, a timestamp is read,
 signed and compared as the Go verifier reads, signs and compares it, and
 the walk that looks for a repeated member name stays within a memory bound
@@ -17,7 +18,9 @@ response echoes must equal it, the bound-key and nonce checks read its
 agentDid and nonce, and the trusted-issuer check runs fifth. A signed field
 holding a character outside ASCII goes into the signed payload as its UTF-8
 bytes, as in the Go verifier, and a fixture file is read as UTF-8 under the
-C locale.
+C locale. A fixture whose fixtureType is missing, null, "" or "otherType"
+prints the SKIP line the Go verifier prints, with an empty fixtureType for
+the first three.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -1618,10 +1621,15 @@ class VerifierStateObjectTest(unittest.TestCase):
     that writes no verifierState member, or one that is not an object, null
     included, fails the fixture when it loads, so before the signature check
     and before its challengeResponse member is read, with one line naming
-    verifierState. A trustScoreComposition fixture needs no verifierState,
-    and a null one is read as none. The cases are built from the valid
-    fixture and a trustScoreComposition fixture. ../go/verify_test.go builds
-    the same cases and expects the same lines."""
+    verifierState. A trustScoreComposition fixture needs no verifierState, a
+    null one is read as none, and one with an empty object passes too, but
+    a fixture of a fixtureType other than challengeResponse whose
+    verifierState is neither an object nor null fails when it loads, so
+    before its trustScoreComposition member is read, with one line naming
+    verifierState. The cases are built from the valid fixture and a
+    trustScoreComposition fixture, two of them with its fixtureType changed
+    to a type this verifier skips. ../go/verify_test.go builds the same
+    cases and expects the same lines."""
 
     def setUp(self) -> None:
         self.text = VALID.read_text(encoding="utf-8")
@@ -1685,11 +1693,97 @@ class VerifierStateObjectTest(unittest.TestCase):
         cases = (
             ("a trustScoreComposition fixture with no verifierState", composition),
             ("a trustScoreComposition fixture with verifierState null", append_member(composition, '"verifierState": null')),
+            ("a trustScoreComposition fixture with verifierState {}", append_member(composition, '"verifierState": {}')),
         )
         for name, text in cases:
             with self.subTest(name):
                 path, code, out, err = run_text(text)
                 self.assertEqual(out, f"PASS  {path}\n" + block)
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_other_fixture_type_with_one_not_an_object_or_null_is_a_fixture_error(self) -> None:
+        composition = COMPOSITION.read_text(encoding="utf-8")
+        self.assertNotIn('"verifierState"', composition)
+
+        def with_state(text: str, value: str) -> str:
+            return append_member(text, '"verifierState": ' + value)
+
+        payload = member_text(composition, "trustScoreComposition")
+        no_payload = composition.replace(",\n  " + payload, "", 1)
+        self.assertNotEqual(no_payload, composition)
+        fixture_type = '"fixtureType": "trustScoreComposition"'
+        other_type = composition.replace(fixture_type, '"fixtureType": "otherType"', 1)
+        self.assertNotEqual(other_type, composition)
+
+        cases = [
+            ("verifierState 0", with_state(composition, "0"), "verifierState: a number, not an object"),
+            ("verifierState false", with_state(composition, "false"), "verifierState: a boolean, not an object"),
+            ('verifierState "x"', with_state(composition, '"x"'), "verifierState: a string, not an object"),
+            ("verifierState []", with_state(composition, "[]"), "verifierState: an array, not an object"),
+            (
+                "verifierState 0 and no trustScoreComposition",
+                with_state(no_payload, "0"),
+                "verifierState: a number, not an object",
+            ),
+            (
+                "verifierState 0 in a fixture of a type this verifier skips",
+                with_state(other_type, "0"),
+                "verifierState: a number, not an object",
+            ),
+        ]
+        for name, text, member in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, fail_block(path, "fixture error: " + member))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 1)
+
+        with self.subTest("verifierState null in a fixture of a type this verifier skips"):
+            path, code, out, err = run_text(with_state(other_type, "null"))
+            self.assertEqual(
+                out,
+                f"SKIP  {path}\n       fixtureType=otherType (this verifier handles challengeResponse and trustScoreComposition)\n"
+                + "\nsummary: 1 pass, 0 fail (1 fixtures)\n",
+            )
+            self.assertEqual(err, "")
+            self.assertEqual(code, 0)
+
+
+class SkipLineTest(unittest.TestCase):
+    """A fixture whose fixtureType is neither challengeResponse nor
+    trustScoreComposition is skipped, which counts as a pass, with one line
+    that writes the fixtureType as the Go verifier's encoding/json reads it
+    into a string: a fixture with no fixtureType member, one whose
+    fixtureType is null and one that writes FixtureType in its place each
+    print the empty string, as does fixtureType "", and fixtureType
+    "otherType" prints otherType. The cases are built from the valid
+    fixture. ../go/verify_test.go builds the same cases and expects the same
+    lines."""
+
+    def test_skip_line_writes_the_fixture_type_as_go_reads_it(self) -> None:
+        text = VALID.read_text(encoding="utf-8")
+        member = member_text(text, "fixtureType")
+        cases = [
+            ("no fixtureType", edited(text, lambda d: d.pop("fixtureType")), ""),
+            ("fixtureType null", edited(text, lambda d: d.update(fixtureType=None)), ""),
+            (
+                "FixtureType in place of fixtureType",
+                text.replace(member, '"FixtureType"' + member.removeprefix('"fixtureType"')),
+                "",
+            ),
+            ('fixtureType ""', edited(text, lambda d: d.update(fixtureType="")), ""),
+            ("fixtureType otherType", edited(text, lambda d: d.update(fixtureType="otherType")), "otherType"),
+        ]
+        for name, fixture, fixture_type in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(fixture)
+                self.assertEqual(
+                    out,
+                    f"SKIP  {path}\n       fixtureType={fixture_type} "
+                    "(this verifier handles challengeResponse and trustScoreComposition)\n\n"
+                    "summary: 1 pass, 0 fail (1 fixtures)\n",
+                )
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
 

@@ -38,12 +38,13 @@
 // prints the summary line.
 //
 // A challengeResponse fixture whose verifierState is missing or is not an
-// object, and a fixture of any fixtureType whose verifierState is an object
-// holding an agentBindings, seenNonces or trustedIssuers that is not an array
-// or null, an agentBindings entry that is not an object, or a seenNonces or
-// trustedIssuers entry that is not a non-empty string, null included, prints
-// that FAIL block before any check runs, with the line the Python verifier
-// prints for it:
+// object, a fixture of another fixtureType whose verifierState is neither an
+// object nor null, and a fixture of any fixtureType whose verifierState is an
+// object holding an agentBindings, seenNonces or trustedIssuers that is not an
+// array or null, an agentBindings entry that is not an object, or a seenNonces
+// or trustedIssuers entry that is not a non-empty string, null included,
+// prints that FAIL block before any check runs, with the line the Python
+// verifier prints for it:
 //
 //	FAIL  <path>
 //	       fixture error: verifierState.seenNonces: a number, not an array
@@ -211,13 +212,14 @@ var protocolMessageTypes = map[reflect.Type]bool{
 // alone. Outside the two bodies each member is read under its exact name
 // (exactMembers). A file that is not JSON fails with the error json.Unmarshal
 // reports for it. A challengeResponse fixture whose verifierState is missing
-// or is not an object is a *memberError, and so is a verifierState
-// agentBindings, seenNonces or trustedIssuers that is not an array or null,
-// or an entry of one that is not of the type verifierStateArrays gives it
-// (checkVerifierState). An agentBindings entry that writes no publicKeyHex,
-// or a null one, is marked for the checks (markPublicKeyHexProblems), and so
-// is a verifierState that writes no clockRfc3339, or a null one
-// (markClockProblem).
+// or is not an object is a *memberError, and so is a fixture of another
+// fixtureType whose verifierState is neither an object nor null, and a
+// verifierState agentBindings, seenNonces or trustedIssuers that is not an
+// array or null, or an entry of one that is not of the type
+// verifierStateArrays gives it (checkVerifierState). An agentBindings entry
+// that writes no publicKeyHex, or a null one, is marked for the checks
+// (markPublicKeyHexProblems), and so is a verifierState that writes no
+// clockRfc3339, or a null one (markClockProblem).
 func parseFixture(b []byte) (Fixture, error) {
 	var f Fixture
 	if json.Valid(b) {
@@ -259,17 +261,19 @@ var verifierStateArrays = []struct{ name, entry string }{
 
 // checkVerifierState returns a *memberError naming the verifierState of a
 // challengeResponse fixture in raw when raw writes none or writes one that is
-// not an object, such as null or []. Otherwise it names the first
-// verifierStateArrays member of the verifierState object that holds a value
-// that is not an array or null, such as 0, false, "" or {}, or the first
-// entry of one that is not of the member's entry type, null included, or is
-// the empty string, named as in verifierState.seenNonces[1]. The members are
-// checked in the order of verifierStateArrays, the entries of each after its
-// value. Each value and entry is read from raw: encoding/json decodes a null
-// entry into the empty string or the zero AgentBinding, and an empty string
-// as written, with no error. It returns nil when there is none, or when raw,
-// or the verifierState of another fixtureType, is not an object, which the
-// decode reports.
+// not an object, such as null or [], and the verifierState of a fixture of
+// another fixtureType when raw writes one that is neither an object nor null,
+// such as 0 or [], which encoding/json would fail to decode into a
+// VerifierState. Otherwise it names the first verifierStateArrays member of
+// the verifierState object that holds a value that is not an array or null,
+// such as 0, false, "" or {}, or the first entry of one that is not of the
+// member's entry type, null included, or is the empty string, named as in
+// verifierState.seenNonces[1]. The members are checked in the order of
+// verifierStateArrays, the entries of each after its value. Each value and
+// entry is read from raw: encoding/json decodes a null entry into the empty
+// string or the zero AgentBinding, and an empty string as written, with no
+// error. It returns nil when there is none, or when raw is not an object,
+// which the decode reports.
 func checkVerifierState(raw []byte) error {
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(raw, &doc) != nil {
@@ -277,11 +281,12 @@ func checkVerifierState(raw []byte) error {
 	}
 	state, written := doc["verifierState"]
 	var fixtureType string
-	if json.Unmarshal(doc["fixtureType"], &fixtureType) == nil && fixtureType == "challengeResponse" {
-		if !written {
-			return &memberError{"verifierState", "missing"}
-		}
-		if kind := jsonType(state); kind != "an object" {
+	challengeResponse := json.Unmarshal(doc["fixtureType"], &fixtureType) == nil && fixtureType == "challengeResponse"
+	if challengeResponse && !written {
+		return &memberError{"verifierState", "missing"}
+	}
+	if written {
+		if kind := jsonType(state); kind != "an object" && (challengeResponse || kind != "null") {
 			return &memberError{"verifierState", kind + ", not an object"}
 		}
 	}
