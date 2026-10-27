@@ -1,0 +1,71 @@
+{
+  "$schema": "https://aip.opena2a.org/schemas/fixture-v1.json",
+  "name": "aip-v0.3/challenge-response-duplicate-member-response",
+  "description": "The challenge-response-valid transcript with one edit: the response body writes agentDid twice, first with the test agent's DID and then with the DID of an agent that has no binding in verifierState. A member name used twice in either body is rejected before the checks, whichever copy a JSON decoder keeps. Verifier MUST REJECT with PARSE_ERROR.",
+  "fixtureType": "challengeResponse",
+  "spec": [
+    {
+      "id": "AIP-SPEC",
+      "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+      "section": "§5.1 Challenge-Response Protocol — step 5: no member name is used twice in either body"
+    }
+  ],
+  "keypairRefs": [
+    {
+      "role": "issuer-primary",
+      "path": "vectors/issuer-primary.json",
+      "algorithm": "Ed25519",
+      "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "keyId": "did:opena2a:authority:opena2a.org#key-1"
+    },
+    {
+      "role": "agent-bound-key",
+      "path": "vectors/agent-bound-key.json",
+      "algorithm": "Ed25519",
+      "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "keyId": "did:opena2a:agent:agent_conformance_test_001#key-1"
+    }
+  ],
+  "verifierState": {
+    "clockRfc3339": "2026-05-28T00:00:00Z",
+    "trustedIssuers": [
+      "did:opena2a:authority:opena2a.org"
+    ],
+    "agentBindings": [
+      {
+        "agentDid": "did:opena2a:agent:agent_conformance_test_001",
+        "algorithm": "Ed25519",
+        "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+      }
+    ],
+    "seenNonces": []
+  },
+  "expected": {
+    "verifyResult": "REJECT",
+    "rejectCategory": "PARSE_ERROR",
+    "reasonContains": "duplicate"
+  },
+  "challengeResponse": {
+    "challenge": {
+      "challenge": "ClvWi9D7pyXv3ttNMoKSQIct2T6MCf6Eme9f06GC6wY",
+      "agentDid": "did:opena2a:agent:agent_conformance_test_001",
+      "nonce": "nJKmKdgYM3lMNkzxAGiNdA",
+      "issuedAt": "2026-05-27T23:58:00Z",
+      "expiresAt": "2026-05-28T00:03:00Z",
+      "issuerDid": "did:opena2a:authority:opena2a.org"
+    },
+    "response": {
+      "agentDid": "did:opena2a:agent:agent_conformance_test_001",
+      "agentDid": "did:opena2a:agent:agent_conformance_test_002",
+      "challenge": "ClvWi9D7pyXv3ttNMoKSQIct2T6MCf6Eme9f06GC6wY",
+      "nonce": "nJKmKdgYM3lMNkzxAGiNdA",
+      "issuedAt": "2026-05-27T23:58:00Z",
+      "expiresAt": "2026-05-28T00:03:00Z",
+      "signature": "8bno3dn0bwJ4/CiC9D8fq6ScFBdjVZAw8gp1I+gL6bUMdxoaKcyMt1h8SYteAWD1YZZnVuf7mUsBlw2dvB1TBw",
+      "publicKey": "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw",
+      "keyId": "did:opena2a:agent:agent_conformance_test_001#key-1",
+      "signedAt": "2026-05-27T23:58:30Z",
+      "algorithm": "Ed25519"
+    }
+  }
+}

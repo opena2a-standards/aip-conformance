@@ -8,9 +8,17 @@ pinned AIP_SPEC_REF.
 
 Contract: every fixture's challengeResponse.challenge validates against the
 challenge-body schema and challengeResponse.response against the response-body
-schema. All current REJECT fixtures are crypto/state rejects (replay, stale
-challenge, wrong key), so they are shape-valid by design; a schema failure
-means fixtures and schemas have drifted apart.
+schema, except a fixture listed in EXEMPTIONS. A listed fixture holds a body
+member whose name AIP §5.1.1 or §5.1.2 does not give the body, which the
+closed schemas (additionalProperties false) refuse by construction and both
+reference verifiers reject before check 1 (PARSE_ERROR); it passes only when
+the one schema error it is listed with is its only error. Any other schema
+failure means fixtures and schemas have drifted apart.
+
+Every fixture also follows the reasonContains pin rule: a fixture whose
+expected.verifyResult is REJECT pins a non-empty expected.reasonContains, and
+a fixture of any other result carries none. A fixture that breaks it fails,
+with one line for the rule.
 
 The format keyword is checked: a member whose schema names the date-time
 format must hold an RFC 3339 date-time (is_date_time). Under draft 2020-12
@@ -74,6 +82,35 @@ def is_date_time(value: object) -> bool:
 FORMAT_CHECKER = FormatChecker(formats=())
 FORMAT_CHECKER.checks("date-time")(is_date_time)
 
+# The fixtures that fail the closed body schemas by construction, each with
+# the one schema error it is listed with: the body, the JSON path and the
+# message.
+EXEMPTIONS = {
+    "challenge-response-case-variant-member.json": (
+        "response", "$", "Additional properties are not allowed ('public\N{KELVIN SIGN}ey' was unexpected)",
+    ),
+    "challenge-response-undefined-member-non-ascii.json": (
+        "response", "$", "Additional properties are not allowed ('\N{LATIN SMALL LETTER DOTLESS I}ssuedAt' was unexpected)",
+    ),
+    "challenge-response-undefined-member-ascii.json": (
+        "response", "$", "Additional properties are not allowed ('issued_at' was unexpected)",
+    ),
+}
+
+
+def pin_problem(doc: dict) -> str | None:
+    """The line for a fixture that breaks the reasonContains pin rule, or
+    None: a REJECT fixture pins a non-empty expected.reasonContains, and a
+    fixture of any other result carries none."""
+    expected = doc.get("expected") or {}
+    verdict = expected.get("verifyResult")
+    pinned = bool(expected.get("reasonContains"))
+    if verdict == "REJECT" and not pinned:
+        return "expected.verifyResult is REJECT and expected.reasonContains is missing or empty: a REJECT fixture pins the reason"
+    if verdict != "REJECT" and pinned:
+        return f"expected.verifyResult is {verdict} and expected.reasonContains is set: only a REJECT fixture pins a reason"
+    return None
+
 
 class UncheckedFormatError(Exception):
     """A vendored schema names a format FORMAT_CHECKER does not check."""
@@ -119,8 +156,13 @@ def main() -> int:
 
     for path in fixtures:
         doc = json.loads(path.read_text(encoding="utf-8"))
+        pin = pin_problem(doc)
         if doc.get("fixtureType", "challengeResponse") != "challengeResponse":
-            print(f"SKIP  {path.name}: fixtureType={doc.get('fixtureType')} carries no §5.1 transcript")
+            if pin:
+                print(f"FAIL  {path.name}:\n      {pin}")
+                failures += 1
+            else:
+                print(f"SKIP  {path.name}: fixtureType={doc.get('fixtureType')} carries no §5.1 transcript")
             continue
         transcript = doc.get("challengeResponse")
         if not transcript or "challenge" not in transcript or "response" not in transcript:
@@ -128,17 +170,28 @@ def main() -> int:
             failures += 1
             continue
         errs = [
-            ("challenge", e) for e in v_challenge.iter_errors(transcript["challenge"])
+            ("challenge", e.json_path, e.message) for e in v_challenge.iter_errors(transcript["challenge"])
         ] + [
-            ("response", e) for e in v_response.iter_errors(transcript["response"])
+            ("response", e.json_path, e.message) for e in v_response.iter_errors(transcript["response"])
         ]
-        if errs:
+        exemption = EXEMPTIONS.get(path.name)
+        exempt = exemption is not None and errs == [exemption]
+        problems = [pin] if pin else []
+        if not exempt:
+            problems += [f"{part} {json_path}: {message}" for part, json_path, message in errs]
+            if exemption is not None:
+                part, json_path, message = exemption
+                problems.append(f"listed exemption, not the only error: {part} {json_path}: {message}")
+        if problems:
             print(f"FAIL  {path.name}:")
-            for part, err in errs:
-                print(f"      {part} {err.json_path}: {err.message}")
+            for problem in problems:
+                print(f"      {problem}")
             failures += 1
         else:
             print(f"PASS  {path.name}")
+            if exempt:
+                part, json_path, message = exemption
+                print(f"      listed exemption: {part} {json_path}: {message}")
 
     print(f"\nsummary: {len(fixtures) - failures} pass, {failures} fail ({len(fixtures)} fixtures)")
     return 1 if failures else 0

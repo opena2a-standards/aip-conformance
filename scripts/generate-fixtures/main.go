@@ -16,6 +16,11 @@
 //   - challenge-response-other-agent-key       AIP §5.1 key bound to the challenge's agentDid (REJECT UNTRUSTED_KEY)
 //   - challenge-response-untrusted-issuer      AIP §5.1 trusted-issuer check (REJECT UNTRUSTED_ISSUER)
 //   - challenge-response-no-trusted-issuers    AIP §5.1 trusted-issuer check, no trustedIssuers member (REJECT UNTRUSTED_ISSUER)
+//   - challenge-response-duplicate-member-response   AIP §5.1.4 no member name used twice in either body (REJECT PARSE_ERROR)
+//   - challenge-response-duplicate-member-challenge  AIP §5.1.4 no member name used twice in either body (REJECT PARSE_ERROR)
+//   - challenge-response-case-variant-member         AIP §5.1.4 each member name is one §5.1.1 or §5.1.2 gives the body (REJECT PARSE_ERROR)
+//   - challenge-response-undefined-member-non-ascii  AIP §5.1.4 each member name is one §5.1.1 or §5.1.2 gives the body (REJECT PARSE_ERROR)
+//   - challenge-response-undefined-member-ascii      AIP §5.1.4 each member name is one §5.1.1 or §5.1.2 gives the body (REJECT PARSE_ERROR)
 //   - load-errors/*                            fixtures both reference verifiers refuse to load
 //
 // Canonical signing form (AIP §5.1, this suite's pinning):
@@ -197,13 +202,8 @@ type ChallengeResponse struct {
 	Response  ResponseBody  `json:"response"`
 }
 
-// ChallengeBody mirrors what an AIP §5.1 IdP returns at step 2.
-//
-// AIP-SPEC §5.1 step 2 names only {challenge, expiresAt}; this conformance
-// suite pins additional fields (agentDid, nonce, issuedAt, issuerDid) so
-// the challenge↔response binding and the issuer attribution are
-// byte-stable. Documented in the repo README as a v0.2 conformance-suite
-// pin, not a spec change.
+// ChallengeBody mirrors what an AIP §5.1 IdP returns at step 2: the members
+// AIP-SPEC §5.1.1 gives the challenge body.
 type ChallengeBody struct {
 	Challenge string `json:"challenge"`
 	AgentDID  string `json:"agentDid"`
@@ -213,12 +213,10 @@ type ChallengeBody struct {
 	IssuerDID string `json:"issuerDid"`
 }
 
-// ResponseBody mirrors what the agent returns at AIP §5.1 step 4.
-//
-// AIP-SPEC §5.1 step 4 names only {signature, publicKey}; this conformance
-// suite pins the back-refs to the challenge fields the signature commits
-// to (challenge, agentDid, nonce, issuedAt, expiresAt) plus signedAt and
-// keyId so the response is self-describing.
+// ResponseBody mirrors what the agent returns at AIP §5.1 step 4: the members
+// AIP-SPEC §5.1.2 gives the response body, the challenge fields the
+// signature commits to (challenge, agentDid, nonce, issuedAt, expiresAt)
+// echoed, then the signature and its key metadata.
 type ResponseBody struct {
 	AgentDID  string `json:"agentDid"`
 	Challenge string `json:"challenge"`
@@ -458,6 +456,12 @@ var (
 	// Fixture 11 (untrusted-issuer) — the one issuer the verifier trusts,
 	// which is not the challenge's issuerDid
 	otherIssuerDID = "did:opena2a:authority:example.org"
+
+	// The member-name fixtures' characters outside ASCII: U+212A KELVIN
+	// SIGN, which Unicode simple case folding maps to k, and U+0131 LATIN
+	// SMALL LETTER DOTLESS I.
+	kelvinSign = string(rune(0x212A))
+	dotlessI   = string(rune(0x0131))
 )
 
 // ---------------------------------------------------------------------------
@@ -515,13 +519,23 @@ func bindingFor(agentDID string, kv KeyVector) AgentBinding {
 
 // object is a JSON object written member by member, in order, a name
 // written twice included, with each value as json.Marshal writes it. The
-// load-error fixtures need it: a struct cannot write a member twice, or hold
-// a value of the wrong JSON type for its field.
+// load-error and member-name fixtures need it: a struct cannot write a
+// member twice, hold a member it has no field for, or hold a value of the
+// wrong JSON type for its field.
 type object []member
 
 type member struct {
 	name  string
 	value any
+}
+
+// spelledAs is a member value written under its member name spelled as the
+// JSON string text nameText, escapes included, in place of the text
+// json.Marshal writes for the name: a fixture can write a name with an
+// escape.
+type spelledAs struct {
+	nameText string
+	value    any
 }
 
 func (o object) MarshalJSON() ([]byte, error) {
@@ -535,7 +549,11 @@ func (o object) MarshalJSON() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		value, err := json.Marshal(m.value)
+		v := m.value
+		if s, ok := v.(spelledAs); ok {
+			name, v = []byte(s.nameText), s.value
+		}
+		value, err := json.Marshal(v)
 		if err != nil {
 			return nil, err
 		}
@@ -580,6 +598,55 @@ func loadErrorFixture(name, description string, keypairRefs []KeypairRef, verifi
 		{"verifierState", verifierState},
 		{"expected", ExpectedOutcome{VerifyResult: "ACCEPT"}},
 		{"challengeResponse", challengeResponse},
+	}
+}
+
+// bodyMembers is body, a ChallengeBody or ResponseBody, as an object of its
+// members in field order.
+func bodyMembers(body any) object {
+	b, err := json.Marshal(body)
+	must(err)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	_, err = dec.Token() // the opening {
+	must(err)
+	var o object
+	for dec.More() {
+		tok, err := dec.Token()
+		must(err)
+		var value json.RawMessage
+		must(dec.Decode(&value))
+		o = append(o, member{tok.(string), value})
+	}
+	return o
+}
+
+// after is o with ms written directly after its member named name.
+func (o object) after(name string, ms ...member) object {
+	for i, m := range o {
+		if m.name == name {
+			out := append(object{}, o[:i+1]...)
+			out = append(out, ms...)
+			return append(out, o[i+1:]...)
+		}
+	}
+	panic(fmt.Sprintf("no member %q", name))
+}
+
+// memberNameFixture is a challenge-response fixture whose two §5.1 bodies
+// are given member by member, for a fixture of the rule on their member
+// names, which a struct cannot break. Both reference verifiers reject it
+// before check 1: REJECT [PARSE_ERROR], the reason containing reasonContains.
+func memberNameFixture(name, description, section string, keypairRefs []KeypairRef, verifierState VerifierState, reasonContains string, challenge, response object) object {
+	return object{
+		{"$schema", "https://aip.opena2a.org/schemas/fixture-v1.json"},
+		{"name", "aip-v0.3/" + name},
+		{"description", description},
+		{"fixtureType", "challengeResponse"},
+		{"spec", specRefs(section)},
+		{"keypairRefs", keypairRefs},
+		{"verifierState", verifierState},
+		{"expected", ExpectedOutcome{VerifyResult: "REJECT", RejectCategory: "PARSE_ERROR", ReasonContains: reasonContains}},
+		{"challengeResponse", object{{"challenge", challenge}, {"response", response}}},
 	}
 }
 
@@ -1078,6 +1145,52 @@ func main() {
 		}},
 	}
 
+	// Member-name fixtures: the valid transcript with one edit to the member
+	// names of a body, which both reference verifiers reject before check 1.
+	memberNames := []struct {
+		writePath string
+		build     func() object
+	}{
+		{"fixtures/challenge-response-duplicate-member-response.json", func() object {
+			return memberNameFixture("challenge-response-duplicate-member-response",
+				"The challenge-response-valid transcript with one edit: the response body writes agentDid twice, first with the test agent's DID and then with the DID of an agent that has no binding in verifierState. A member name used twice in either body is rejected before the checks, whichever copy a JSON decoder keeps. Verifier MUST REJECT with PARSE_ERROR.", "§5.1 Challenge-Response Protocol — step 5: no member name is used twice in either body",
+				validKeys, validState, "duplicate",
+				bodyMembers(validBody),
+				bodyMembers(validResponse).after("agentDid", member{"agentDid", agentSecond.AgentDID}))
+		}},
+		{"fixtures/challenge-response-duplicate-member-challenge.json", func() object {
+			// The second nonce is written with its o as the JSON escape of
+			// U+006F, so the name resolves to nonce.
+			return memberNameFixture("challenge-response-duplicate-member-challenge",
+				"The challenge-response-valid transcript with one edit: the challenge body writes nonce twice with the same value, the second time under the name n\\u006fnce, a JSON escape that resolves to nonce. Names are compared after JSON escapes are resolved, and a name used twice is rejected before the checks whatever its values. Verifier MUST REJECT with PARSE_ERROR.", "§5.1 Challenge-Response Protocol — step 5: no member name is used twice in either body",
+				validKeys, validState, "duplicate",
+				bodyMembers(validBody).after("nonce", member{"nonce", spelledAs{"\"n\\u006fnce\"", validNonce}}),
+				bodyMembers(validResponse))
+		}},
+		{"fixtures/challenge-response-case-variant-member.json", func() object {
+			return memberNameFixture("challenge-response-case-variant-member",
+				"The challenge-response-valid transcript with one edit: after publicKey, the response body carries a member whose name is publicKey written with U+212A KELVIN SIGN in place of the K, holding the unbound test key. Names are compared code point for code point, so that name is not one §5.1.2 gives the response body, although a decoder that folds Unicode case could read it as publicKey. Verifier MUST REJECT with PARSE_ERROR.", "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body",
+				append(validKeys[:len(validKeys):len(validKeys)], keypairRefFor(agentUnbound, "vectors/agent-unbound-key.json")),
+				validState, "undefined",
+				bodyMembers(validBody),
+				bodyMembers(validResponse).after("publicKey", member{"public" + kelvinSign + "ey", publicKeyB64Raw(agentUnbound.SeedHex)}))
+		}},
+		{"fixtures/challenge-response-undefined-member-non-ascii.json", func() object {
+			return memberNameFixture("challenge-response-undefined-member-non-ascii",
+				"The challenge-response-valid transcript with one edit: the response body carries an added member whose name is issuedAt written with U+0131 LATIN SMALL LETTER DOTLESS I in place of the i. Names are compared code point for code point, so that name is not issuedAt and is not one §5.1.2 gives the response body. Verifier MUST REJECT with PARSE_ERROR.", "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body",
+				validKeys, validState, "undefined",
+				bodyMembers(validBody),
+				bodyMembers(validResponse).after("issuedAt", member{dotlessI + "ssuedAt", validIssuedAt}))
+		}},
+		{"fixtures/challenge-response-undefined-member-ascii.json", func() object {
+			return memberNameFixture("challenge-response-undefined-member-ascii",
+				"The challenge-response-valid transcript with one edit: the response body carries an added member named issued_at. That name is not one §5.1.2 gives the response body, although a decoder that maps snake_case names onto camelCase ones could read it as issuedAt. Verifier MUST REJECT with PARSE_ERROR.", "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body",
+				validKeys, validState, "undefined",
+				bodyMembers(validBody),
+				bodyMembers(validResponse).after("issuedAt", member{"issued_at", validIssuedAt}))
+		}},
+	}
+
 	manifest := make(map[string]string)
 	for _, fs := range fixtures {
 		f := fs.build()
@@ -1085,6 +1198,9 @@ func main() {
 	}
 	for _, le := range loadErrors {
 		writeFixture(le.writePath, le.build(), manifest)
+	}
+	for _, mn := range memberNames {
+		writeFixture(mn.writePath, mn.build(), manifest)
 	}
 	writeManifest("MANIFEST.sha256", manifest)
 }

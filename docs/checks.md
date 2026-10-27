@@ -5,6 +5,13 @@ exercises. The [README](../README.md) lists them in short.
 
 ## §5.1 challenge-response fixtures
 
+Before check 1, both verifiers reject a transcript in which an object in either
+body writes one member name twice, or in which either body has a member whose
+name §5.1.1 or §5.1.2 does not give that body (`PARSE_ERROR`). Names are
+compared code point for code point after JSON escapes are resolved. Inside the
+two bodies this is a verdict; a name written twice outside them is a load
+error, as the load-error fixtures below show.
+
 Both verifiers apply the AIP §5.1 checks in this order; the first that
 fails decides the reject category:
 
@@ -20,9 +27,10 @@ fails decides the reject category:
    (`UNTRUSTED_ISSUER`). A `trustedIssuers` that is missing, null or empty
    holds no issuer, so this check refuses every `issuerDid`.
 
-When an echoed field differs, the reason shows both values, and the
+When an echoed field differs, the reason shows both values; the
 `UNTRUSTED_KEY` and `UNTRUSTED_ISSUER` reasons and the ACCEPT note show the
-DID they name; each value is written in double quotes, escaped as Go's
+DID they name; and a `PARSE_ERROR` reason shows the duplicate or undefined
+member name. Each is written in double quotes, escaped as Go's
 `strconv.QuoteToASCII` escapes it, so both verifiers print the same bytes.
 
 All fixtures use:
@@ -31,7 +39,7 @@ All fixtures use:
 - Test agent DID: `did:opena2a:agent:agent_conformance_test_001`
 - Pinned verifier clock: `2026-05-28T00:00:00Z`
 - Agent-bound Ed25519 keypair source: [RFC 8032 §7.1 Test 2](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
-- Agent-unbound Ed25519 keypair source (wrong-key fixture): [RFC 8032 §7.1 Test 3](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
+- Agent-unbound Ed25519 keypair source (wrong-key and case-variant-member fixtures): [RFC 8032 §7.1 Test 3](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
 - Second agent (echoed-agent-differs and other-agent-key fixtures): `did:opena2a:agent:agent_conformance_test_002`, bound keypair source [RFC 8032 §7.1 TEST 1024](https://datatracker.ietf.org/doc/html/rfc8032#section-7.1)
 
 | Fixture | Expected | Exercises |
@@ -45,6 +53,11 @@ All fixtures use:
 | `fixtures/challenge-response-other-agent-key.json` | REJECT (UNTRUSTED_KEY) | The same challenge and key, with every challenge field echoed as written. The presented key is bound, but to another agent than `challenge.agentDid`. |
 | `fixtures/challenge-response-untrusted-issuer.json` | REJECT (UNTRUSTED_ISSUER) | The valid transcript under a `verifierState` whose `trustedIssuers` does not hold the challenge's `issuerDid`. Checks 1-4 pass; check 5 refuses. |
 | `fixtures/challenge-response-no-trusted-issuers.json` | REJECT (UNTRUSTED_ISSUER) | The valid transcript under a `verifierState` that writes no `trustedIssuers` member. An absent `trustedIssuers`, like a null or empty one, is the empty trusted-issuer set: the verifier trusts no issuer. Checks 1-4 pass; check 5 refuses. |
+| `fixtures/challenge-response-duplicate-member-response.json` | REJECT (PARSE_ERROR) | The valid transcript with the response's `agentDid` written twice: first the test agent's DID, then the DID of an agent with no binding in `verifierState.agentBindings`. Refused before check 1, whichever copy a decoder keeps. The reason names `agentDid` as a `duplicate` member of the response. |
+| `fixtures/challenge-response-duplicate-member-challenge.json` | REJECT (PARSE_ERROR) | The valid transcript with the challenge's `nonce` written twice with the same value, the second time as `n\u006fnce`, which resolves to `nonce`. Refused before check 1: names are compared after JSON escapes are resolved, whatever the values. The reason names `nonce` as a `duplicate` member of the challenge. |
+| `fixtures/challenge-response-case-variant-member.json` | REJECT (PARSE_ERROR) | The valid transcript with a member added after the response's `publicKey`: its name is `publicKey` with U+212A KELVIN SIGN in place of the `K`, and it holds the unbound test key. Refused before check 1: compared code point for code point, the name is not one the response body defines. The reason names it as an `undefined` member of the response. |
+| `fixtures/challenge-response-undefined-member-non-ascii.json` | REJECT (PARSE_ERROR) | The valid transcript with an added response member whose name is `issuedAt` with U+0131 LATIN SMALL LETTER DOTLESS I in place of the `i`. Refused before check 1: compared code point for code point, the name is not one the response body defines. The reason names it as an `undefined` member of the response. |
+| `fixtures/challenge-response-undefined-member-ascii.json` | REJECT (PARSE_ERROR) | The valid transcript with an added response member named `issued_at`. Refused before check 1: the name is not one the response body defines, although a decoder that maps snake_case names onto camelCase ones could read it as `issuedAt`. The reason names it as an `undefined` member of the response. |
 
 ## Load-error fixtures
 

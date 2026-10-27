@@ -44,6 +44,51 @@
   ],
   "requirements": [
     {
+      "fixture": "fixtures/challenge-response-case-variant-member.json",
+      "name": "aip-v0.3/challenge-response-case-variant-member",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body"
+        }
+      ],
+      "expected": "REJECT[PARSE_ERROR]",
+      "description": "The challenge-response-valid transcript with one edit: after publicKey, the response body carries a member whose name is publicKey written with U+212A KELVIN SIGN in place of the K, holding the unbound test key. Names are compared code point for code point, so that name is not one §5.1.2 gives the response body, although a decoder that folds Unicode case could read it as publicKey. Verifier MUST REJECT with PARSE_ERROR."
+    },
+    {
+      "fixture": "fixtures/challenge-response-duplicate-member-challenge.json",
+      "name": "aip-v0.3/challenge-response-duplicate-member-challenge",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: no member name is used twice in either body"
+        }
+      ],
+      "expected": "REJECT[PARSE_ERROR]",
+      "description": "The challenge-response-valid transcript with one edit: the challenge body writes nonce twice with the same value, the second time under the name n\\u006fnce, a JSON escape that resolves to nonce. Names are compared after JSON escapes are resolved, and a name used twice is rejected before the checks whatever its values. Verifier MUST REJECT with PARSE_ERROR."
+    },
+    {
+      "fixture": "fixtures/challenge-response-duplicate-member-response.json",
+      "name": "aip-v0.3/challenge-response-duplicate-member-response",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: no member name is used twice in either body"
+        }
+      ],
+      "expected": "REJECT[PARSE_ERROR]",
+      "description": "The challenge-response-valid transcript with one edit: the response body writes agentDid twice, first with the test agent's DID and then with the DID of an agent that has no binding in verifierState. A member name used twice in either body is rejected before the checks, whichever copy a JSON decoder keeps. Verifier MUST REJECT with PARSE_ERROR."
+    },
+    {
       "fixture": "fixtures/challenge-response-echoed-agent-differs.json",
       "name": "aip-v0.3/challenge-response-echoed-agent-differs",
       "fixtureType": "challengeResponse",
@@ -132,6 +177,36 @@
       ],
       "expected": "REJECT[CHALLENGE_EXPIRED]",
       "description": "An AIP §5.1 challenge-response transcript where the challenge expired before the verifier's pinned clock. expiresAt is 25 minutes earlier than verifierState.clockRfc3339. The signature is otherwise mathematically valid and made by the agent's bound key. Verifier MUST REJECT with CHALLENGE_EXPIRED."
+    },
+    {
+      "fixture": "fixtures/challenge-response-undefined-member-ascii.json",
+      "name": "aip-v0.3/challenge-response-undefined-member-ascii",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body"
+        }
+      ],
+      "expected": "REJECT[PARSE_ERROR]",
+      "description": "The challenge-response-valid transcript with one edit: the response body carries an added member named issued_at. That name is not one §5.1.2 gives the response body, although a decoder that maps snake_case names onto camelCase ones could read it as issuedAt. Verifier MUST REJECT with PARSE_ERROR."
+    },
+    {
+      "fixture": "fixtures/challenge-response-undefined-member-non-ascii.json",
+      "name": "aip-v0.3/challenge-response-undefined-member-non-ascii",
+      "fixtureType": "challengeResponse",
+      "level": "MUST",
+      "specRefs": [
+        {
+          "id": "AIP-SPEC",
+          "ref": "https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md",
+          "section": "§5.1 Challenge-Response Protocol — step 5: each member name is one that §5.1.1 or §5.1.2 gives the body"
+        }
+      ],
+      "expected": "REJECT[PARSE_ERROR]",
+      "description": "The challenge-response-valid transcript with one edit: the response body carries an added member whose name is issuedAt written with U+0131 LATIN SMALL LETTER DOTLESS I in place of the i. Names are compared code point for code point, so that name is not issuedAt and is not one §5.1.2 gives the response body. Verifier MUST REJECT with PARSE_ERROR."
     },
     {
       "fixture": "fixtures/challenge-response-untrusted-issuer.json",
