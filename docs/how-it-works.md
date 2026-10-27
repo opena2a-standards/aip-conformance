@@ -55,19 +55,19 @@ whose echo differs (`SIGNATURE_INVALID`, naming the field); the bound-key,
 nonce and trusted-issuer checks read the challenge body
 ([the checks in order](checks.md#51-challenge-response-fixtures)).
 
-### Challenge and response wire-format pinning (beyond AIP-SPEC §5.1)
+### Challenge and response members (AIP-SPEC §5.1.1 and §5.1.2)
 
-AIP-SPEC §5.1 step 2 names only `{challenge, expiresAt}` on the IdP →
-RP message; step 4 names only `{signature, publicKey}` on the agent → RP
-message. This suite pins additional fields needed for byte-stable
-conformance and unambiguous replay-prevention:
+AIP-SPEC §5.1.1 gives the challenge body (IdP → RP) its members, and
+§5.1.2 gives the response body (agent → RP) its members:
 
 - Challenge body: `{challenge, agentDid, nonce, issuedAt, expiresAt, issuerDid}`
 - Response body: `{agentDid, challenge, nonce, issuedAt, expiresAt, signature, publicKey, keyId, signedAt, algorithm}`
 
-These pins are conformance-suite contracts, not spec changes. AIP-SPEC
-v1.0.0-final may formalize them, narrow them, or replace them with
-JCS-canonical JSON.
+Before check 1, both verifiers reject a transcript in which an object in
+either body writes one member name twice, or in which either body has a
+member whose name is not one of these (`PARSE_ERROR`). Names are compared
+code point for code point after JSON escapes are resolved
+([the rule and its fixtures](checks.md#51-challenge-response-fixtures)).
 
 ### Replay detection in a stateless verifier
 

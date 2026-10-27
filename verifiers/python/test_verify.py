@@ -22,7 +22,9 @@ holding a character outside ASCII goes into the signed payload as its UTF-8
 bytes, as in the Go verifier, and a fixture file is read as UTF-8 under the
 C locale. A fixture whose fixtureType is missing, null, "" or "otherType"
 prints the SKIP line the Go verifier prints, with an empty fixtureType for
-the first three.
+the first three. Before check 1, a §5.1 body in which an object writes one
+member name twice, or which has a member its section does not give it, is
+REJECT [PARSE_ERROR] with the line the Go verifier prints.
 
 Run from this directory:
     python3 -m unittest -v test_verify
@@ -1113,7 +1115,8 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
     member it writes twice fails the fixture to load with the line of the
     other repeated members, and a member spelled in another case is not read
     as challenge or response. A member repeated inside a body is not a load
-    error. A body is the member challenge or response of the top-level
+    error: the fixture loads, and the member-name rule rejects the transcript
+    before check 1. A body is the member challenge or response of the top-level
     challengeResponse, so a repeat in a top-level member named
     challengeResponse.challenge or challengeResponse.response, or in
     challengeResponse.challenge under a member with the empty name, is a load
@@ -1183,7 +1186,7 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                 self.assertEqual(err, "")
                 self.assertEqual(code, 1)
 
-    def test_case_variant_and_repeat_inside_a_body_keep_the_verdict(self) -> None:
+    def test_case_variant_keeps_the_verdict_and_repeat_inside_a_body_is_rejected(self) -> None:
         def m(name: str, value: object) -> str:
             return json.dumps(name) + ": " + json.dumps(value)
 
@@ -1206,13 +1209,6 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                     m("response", self.response),
                 ),
             ),
-            (
-                "keyId twice inside the response body, both copies the same",
-                self.with_container(
-                    m("challenge", self.challenge),
-                    '"response": ' + response.replace(key_id, key_id + ", " + key_id, 1),
-                ),
-            ),
         ]
         note = "signature: ed25519=true (verified against agentDid \"did:opena2a:agent:agent_conformance_test_001\" bound key)"
         for name, text in accepts:
@@ -1221,6 +1217,191 @@ class RepeatedChallengeResponseMemberTest(unittest.TestCase):
                 self.assertEqual(out, pass_block(path, "", note))
                 self.assertEqual(err, "")
                 self.assertEqual(code, 0)
+
+        with self.subTest("keyId twice inside the response body, both copies the same"):
+            path, code, out, err = run_text(
+                self.with_container(
+                    m("challenge", self.challenge),
+                    '"response": ' + response.replace(key_id, key_id + ", " + key_id, 1),
+                )
+            )
+            reason = member_name_reason("response", "duplicate", '"keyId"')
+            self.assertEqual(
+                out,
+                f"FAIL  {path}\n       expected: ACCEPT\n       observed: REJECT[PARSE_ERROR: {reason}]\n\n"
+                "summary: 0 pass, 1 fail (1 fixtures)\n",
+            )
+            self.assertEqual(err, "")
+            self.assertEqual(code, 1)
+
+
+def member_name_reason(body: str, defect: str, quoted: str) -> str:
+    """The PARSE_ERROR reason for a member name of body, written as quoted,
+    that the member-name rule refuses as defect."""
+    return f"{body} contains {defect} member {quoted} (member names are compared exactly, after JSON escapes are resolved)"
+
+
+class BodyMemberNameRuleTest(unittest.TestCase):
+    """Before check 1, an object in either §5.1 body that writes one member
+    name twice, or a body member whose name §5.1.1 or §5.1.2 does not give
+    that body, is REJECT [PARSE_ERROR]. Names are compared code point for
+    code point after JSON escapes are resolved, never folded, and the reason
+    writes the name as _quote_ascii writes it. The duplicate test runs over
+    the challenge body, then the response body, and before the defined-name
+    test over the two in the same order. In a body the duplicate test names
+    the object that opens first, and in it the name whose second occurrence
+    comes first; the defined-name test names the first undefined member in
+    document order. The cases are built from the valid fixture.
+    ../go/verify_test.go builds the same cases and expects the same lines."""
+
+    def setUp(self) -> None:
+        self.text = VALID.read_text(encoding="utf-8")
+        self.container = member_text(self.text, "challengeResponse")
+        bodies = json.loads(self.container.removeprefix('"challengeResponse": '))
+        self.challenge, self.response = json.dumps(bodies["challenge"]), json.dumps(bodies["response"])
+
+    def fixture(self, challenge: str, response: str) -> str:
+        """The valid fixture with the two bodies written as given and the
+        expected outcome REJECT [PARSE_ERROR]."""
+        text = self.text.replace(
+            self.container, '"challengeResponse": {"challenge": ' + challenge + ', "response": ' + response + "}", 1
+        )
+        return text.replace(
+            member_text(self.text, "expected"), '"expected": {"verifyResult": "REJECT", "rejectCategory": "PARSE_ERROR"}', 1
+        )
+
+    @staticmethod
+    def value(body: str, name: str) -> str:
+        """The value of the member name of body, as written."""
+        return member_text(body, name).removeprefix(json.dumps(name) + ": ")
+
+    @staticmethod
+    def after(body: str, name: str, *members: str) -> str:
+        """body with members, each written as text, added after its member
+        name."""
+        member = member_text(body, name)
+        return body.replace(member, member + ", " + ", ".join(members), 1)
+
+    def test_rule_rejects_before_check_1(self) -> None:
+        challenge, response, value, after = self.challenge, self.response, self.value, self.after
+        agent_twice = after(response, "agentDid", '"agentDid": "did:opena2a:agent:agent_conformance_test_002"')
+        nonce_escaped = after(challenge, "nonce", '"n\\u006fnce": ' + value(challenge, "nonce"))
+        key_id_twice = after(response, "keyId", '"keyId": ' + value(response, "keyId"))
+        nonce_case = after(challenge, "nonce", '"Nonce": ' + value(challenge, "nonce"))
+        clock = member_text(self.text, "clockRfc3339")
+        cases = [
+            (
+                "a response member written twice, the second time with another DID",
+                self.fixture(challenge, agent_twice),
+                member_name_reason("response", "duplicate", '"agentDid"'),
+            ),
+            (
+                "a challenge member written twice with one value, the second name with an escape",
+                self.fixture(nonce_escaped, response),
+                member_name_reason("challenge", "duplicate", '"nonce"'),
+            ),
+            (
+                "a response member written twice with one value",
+                self.fixture(challenge, key_id_twice),
+                member_name_reason("response", "duplicate", '"keyId"'),
+            ),
+            (
+                "publicKey with U+212A KELVIN SIGN in place of the K",
+                self.fixture(challenge, after(response, "publicKey", '"public\\u212aey": ' + value(response, "publicKey"))),
+                member_name_reason("response", "undefined", '"public\\u212aey"'),
+            ),
+            (
+                "issuedAt with U+0131 LATIN SMALL LETTER DOTLESS I in place of the i",
+                self.fixture(challenge, after(response, "issuedAt", '"\\u0131ssuedAt": ' + value(response, "issuedAt"))),
+                member_name_reason("response", "undefined", '"\\u0131ssuedAt"'),
+            ),
+            (
+                "issued_at",
+                self.fixture(challenge, after(response, "issuedAt", '"issued_at": ' + value(response, "issuedAt"))),
+                member_name_reason("response", "undefined", '"issued_at"'),
+            ),
+            (
+                "PublicKey holding a number",
+                self.fixture(challenge, after(response, "publicKey", '"PublicKey": 7')),
+                member_name_reason("response", "undefined", '"PublicKey"'),
+            ),
+            (
+                "a challenge member named Nonce",
+                self.fixture(nonce_case, response),
+                member_name_reason("challenge", "undefined", '"Nonce"'),
+            ),
+            (
+                "a member written twice in each body: the challenge body is tested first",
+                self.fixture(nonce_escaped, agent_twice),
+                member_name_reason("challenge", "duplicate", '"nonce"'),
+            ),
+            (
+                "an undefined challenge member and a response member written twice: the duplicate test runs first",
+                self.fixture(nonce_case, key_id_twice),
+                member_name_reason("response", "duplicate", '"keyId"'),
+            ),
+            (
+                "two undefined members: the first in document order",
+                self.fixture(challenge, after(after(response, "algorithm", '"a-last": 2'), "agentDid", '"x-first": 1')),
+                member_name_reason("response", "undefined", '"x-first"'),
+            ),
+            (
+                "a name written twice in an object an undefined member holds",
+                self.fixture(challenge, after(response, "algorithm", '"extension": {"a": 1, "a": 2}')),
+                member_name_reason("response", "duplicate", '"a"'),
+            ),
+            (
+                "the body repeats a name after a nested object does: the object that opens first is named",
+                self.fixture(
+                    challenge,
+                    after(
+                        after(response, "agentDid", '"extension": {"a": 1, "a": 2}'),
+                        "keyId",
+                        '"keyId": ' + value(response, "keyId"),
+                    ),
+                ),
+                member_name_reason("response", "duplicate", '"keyId"'),
+            ),
+            (
+                "two names written twice in one object: the second occurrence that comes first",
+                self.fixture(
+                    challenge, after(response, "algorithm", '"algorithm": "Ed25519"', '"keyId": ' + value(response, "keyId"))
+                ),
+                member_name_reason("response", "duplicate", '"algorithm"'),
+            ),
+            (
+                "two unpaired surrogate escapes, each decoded to U+FFFD",
+                self.fixture(challenge, after(response, "algorithm", '"\\ud800": 1', '"\\udbff": 2')),
+                member_name_reason("response", "duplicate", '"\\ufffd"'),
+            ),
+            (
+                "one unpaired surrogate escape",
+                self.fixture(challenge, after(response, "algorithm", '"\\ud800": 1')),
+                member_name_reason("response", "undefined", '"\\ufffd"'),
+            ),
+            (
+                "before check 3 reads a clock that is not a date-time",
+                self.fixture(challenge, agent_twice).replace(clock, '"clockRfc3339": "not-a-time"', 1),
+                member_name_reason("response", "duplicate", '"agentDid"'),
+            ),
+        ]
+        for name, text, reason in cases:
+            with self.subTest(name):
+                path, code, out, err = run_text(text)
+                self.assertEqual(out, pass_block(path, "PARSE_ERROR", reason))
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+
+    def test_member_names_are_the_schema_properties(self) -> None:
+        """The member names the rule gives each §5.1 body are the properties
+        of its vendored AIP schema, which closes the body
+        (additionalProperties false)."""
+        vendor = FIXTURES.parent / "schemas" / "vendor" / "agent-identity-protocol"
+        for name, defined in verify._PROTOCOL_MESSAGE_BODIES:
+            with self.subTest(name):
+                schema = json.loads((vendor / f"{name}-body-v1.schema.json").read_text(encoding="utf-8"))
+                self.assertIs(schema.get("additionalProperties"), False)
+                self.assertEqual(set(schema["properties"]), set(defined))
 
 
 class VerifierStateArrayMemberTest(unittest.TestCase):

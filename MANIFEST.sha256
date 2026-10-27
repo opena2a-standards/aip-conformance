@@ -1,11 +1,16 @@
 # AIP conformance fixtures (§5.1 challenge-response, §6.1 trust-score composition) — SHA-256 (per file, path-sorted)
 # Re-running scripts/generate-fixtures MUST reproduce these exact hashes.
+39f7988ab502673c0f9bd9ec65532ae82cd4be994faef406505e841d421950db  fixtures/challenge-response-case-variant-member.json
+7aa39b6587cfd92eec8074da56b9ca589a8f21b965e9799873379810ad44ddce  fixtures/challenge-response-duplicate-member-challenge.json
+0ed05351b1b8b078875424dbc4008de909ec6ad2108943f4ef9df090f8d38025  fixtures/challenge-response-duplicate-member-response.json
 319a982e1c8a96f69b100a642d6c6755ecfb6dce3a9abba2239c68ff10c9cb1d  fixtures/challenge-response-echoed-agent-differs.json
 20b98d88303fe22b9c9b4d18f5c03805bafcb885a4a2bef5a2ddbee5b3ee2d46  fixtures/challenge-response-echoed-nonce-differs.json
 25daeb7d22c2b3a0bd7d4df8be331b39b39c47a46bdd5bdda6f1e0301305f2e7  fixtures/challenge-response-no-trusted-issuers.json
 36c17aa0bf0a7fe546ad0838029338552dd45aee535683649bf0bde05958a50a  fixtures/challenge-response-other-agent-key.json
 b742c9d06c314eb6ed765c1a3edab221b5a310c27121a8f14e54f9e6913d4ba1  fixtures/challenge-response-replay.json
 bc4b0ccd7156da12ad75e35f2b04b53cf0585e5080599b6f14279cd403092b2a  fixtures/challenge-response-stale-challenge.json
+e271d5a92ebc81eb81d0563093f1961af461518d5990ef1b076d2dab9301c4ba  fixtures/challenge-response-undefined-member-ascii.json
+bf2fcf82798685f3a59cd4a7ace5d33af67d0532a4c7b738eb63f51a682e8361  fixtures/challenge-response-undefined-member-non-ascii.json
 5d16d9ebeb42b29ed5c6b3ce2772fd51bd93a9b68459926bcd30eee14098c74e  fixtures/challenge-response-untrusted-issuer.json
 ad3485a3a01cadc6fdfd2fc593e21d714ad71d38a254b14f674140b2d5bd3fe0  fixtures/challenge-response-valid.json
 5c485cd1e18a193798b4033b63a775102e069c80992c0c7b9b6d1b561caae4f7  fixtures/challenge-response-wrong-key.json

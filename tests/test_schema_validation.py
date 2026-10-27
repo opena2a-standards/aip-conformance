@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Regression tests for scripts/schema_validation.py: a member whose schema
 names the date-time format fails its fixture when it holds a value that is
-not an RFC 3339 date-time, and a vendored schema that names a format the
-script does not check stops the run.
+not an RFC 3339 date-time, a vendored schema that names a format the
+script does not check stops the run, a REJECT fixture with no
+reasonContains and a fixture of another result with one each fail, and a
+fixture listed in EXEMPTIONS passes only when its listed error is its only
+error.
 
-The fixture tests point the script at a temporary directory holding an
-edited copy of the valid fixture, and the format test at a temporary
+The fixture tests point the script at a temporary directory holding edited
+copies of shipped fixtures, and the format test at a temporary
 directory holding edited copies of the schemas. The tracked files are never
 modified. The tests need the jsonschema package and are skipped without it.
 
@@ -165,6 +168,95 @@ class DateTimeFormatTest(unittest.TestCase):
                 self.assertFalse(schema_validation.is_date_time(value))
         # The type keyword, not the format, reports a value that is not a string.
         self.assertTrue(schema_validation.is_date_time(1780000000))
+
+
+def run_on_docs(docs: dict) -> tuple[int, str]:
+    """run_main over a fixtures directory holding each document of docs
+    under its file name."""
+    with tempfile.TemporaryDirectory() as d:
+        for name, doc in docs.items():
+            (Path(d) / name).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        with mock.patch.object(schema_validation, "FIXTURES", Path(d)):
+            return run_main()
+
+
+def shipped(name: str) -> dict:
+    """The shipped fixture of that file name, decoded."""
+    return json.loads((REPO_ROOT / "fixtures" / name).read_text(encoding="utf-8"))
+
+
+NO_PIN = "expected.verifyResult is REJECT and expected.reasonContains is missing or empty: a REJECT fixture pins the reason"
+CASE_VARIANT = "challenge-response-case-variant-member.json"
+CASE_VARIANT_ERROR = "response $: Additional properties are not allowed ('public\N{KELVIN SIGN}ey' was unexpected)"
+
+
+class ReasonContainsPinTest(unittest.TestCase):
+    def test_reject_without_a_pin_fails(self) -> None:
+        for expected in (
+            {"verifyResult": "REJECT", "rejectCategory": "PARSE_ERROR"},
+            {"verifyResult": "REJECT", "rejectCategory": "PARSE_ERROR", "reasonContains": ""},
+        ):
+            with self.subTest(expected=expected):
+                doc = shipped(VALID.name)
+                doc["expected"] = expected
+                code, out = run_on_docs({VALID.name: doc})
+                self.assertEqual(out, f"FAIL  {VALID.name}:\n      {NO_PIN}\n\nsummary: 0 pass, 1 fail (1 fixtures)\n")
+                self.assertEqual(code, 1)
+
+    def test_other_result_with_a_pin_fails(self) -> None:
+        doc = shipped(VALID.name)
+        doc["expected"] = {"verifyResult": "ACCEPT", "reasonContains": "nonce"}
+        composition = shipped("trust-score-measured-six-factors-capped.json")
+        composition["expected"]["reasonContains"] = "score"
+        code, out = run_on_docs({VALID.name: doc, "trust-score-measured-six-factors-capped.json": composition})
+        self.assertEqual(
+            out,
+            f"FAIL  {VALID.name}:\n"
+            "      expected.verifyResult is ACCEPT and expected.reasonContains is set: only a REJECT fixture pins a reason\n"
+            "FAIL  trust-score-measured-six-factors-capped.json:\n"
+            "      expected.verifyResult is MEASURED and expected.reasonContains is set: only a REJECT fixture pins a reason\n"
+            "\nsummary: 0 pass, 2 fail (2 fixtures)\n",
+        )
+        self.assertEqual(code, 1)
+
+    def test_shipped_fixtures_follow_the_rule(self) -> None:
+        for path in sorted((REPO_ROOT / "fixtures").glob("*.json")):
+            with self.subTest(path.name):
+                self.assertIsNone(schema_validation.pin_problem(shipped(path.name)))
+
+
+class ListedExemptionTest(unittest.TestCase):
+    def test_listed_fixture_passes_on_its_one_error(self) -> None:
+        code, out = run_on_docs({CASE_VARIANT: shipped(CASE_VARIANT)})
+        self.assertEqual(
+            out,
+            f"PASS  {CASE_VARIANT}\n      listed exemption: {CASE_VARIANT_ERROR}\n\nsummary: 1 pass, 0 fail (1 fixtures)\n",
+        )
+        self.assertEqual(code, 0)
+
+    def test_listed_fixture_with_another_error_fails(self) -> None:
+        doc = shipped(CASE_VARIANT)
+        doc["challengeResponse"]["challenge"]["issuedAt"] = "tomorrow"
+        code, out = run_on_docs({CASE_VARIANT: doc})
+        self.assertEqual(
+            out,
+            f"FAIL  {CASE_VARIANT}:\n"
+            "      challenge $.issuedAt: 'tomorrow' is not a 'date-time'\n"
+            f"      {CASE_VARIANT_ERROR}\n"
+            f"      listed exemption, not the only error: {CASE_VARIANT_ERROR}\n"
+            "\nsummary: 0 pass, 1 fail (1 fixtures)\n",
+        )
+        self.assertEqual(code, 1)
+
+    def test_unlisted_fixture_with_an_undefined_member_fails(self) -> None:
+        code, out = run_on_valid_copy(("response", "issued_at", "2026-05-27T23:58:00Z"))
+        self.assertEqual(
+            out,
+            f"FAIL  {VALID.name}:\n"
+            "      response $: Additional properties are not allowed ('issued_at' was unexpected)\n"
+            "\nsummary: 0 pass, 1 fail (1 fixtures)\n",
+        )
+        self.assertEqual(code, 1)
 
 
 class UncheckedFormatTest(unittest.TestCase):

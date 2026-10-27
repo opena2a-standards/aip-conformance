@@ -15,11 +15,14 @@
 // Exit code is 0 if every fixture's observed result matches the expected
 // result AND the rejection category matches (when declared).
 //
-// Outside the two §5.1 bodies (challengeResponse.challenge and
-// challengeResponse.response) a fixture's members are read under their exact
-// names (VerifierState is not verifierState), and a fixture that writes one
-// member name twice in the same JSON object fails to load on both verifiers,
-// which counts as a fail (exit code 1).
+// A fixture's members are read under their exact names (VerifierState is not
+// verifierState). Outside the two §5.1 bodies (challengeResponse.challenge
+// and challengeResponse.response) a fixture that writes one member name
+// twice in the same JSON object fails to load on both verifiers, which
+// counts as a fail (exit code 1). Inside them, before check 1, a JSON object
+// that writes one member name twice, or a body member whose name AIP §5.1.1
+// or §5.1.2 does not give that body, is REJECT [PARSE_ERROR]
+// (memberNameDefect).
 //
 // A challengeResponse fixture whose verifierState is missing or is not an
 // object, a fixture of another fixtureType whose verifierState is neither an
@@ -190,26 +193,21 @@ type Fixture struct {
 
 // protocolMessages names the fixture members that hold the protocol messages
 // under test: the two §5.1 bodies inside challengeResponse, each by the
-// member names on its path from the top-level object. parseFixture leaves
-// their values to encoding/json as written: they are not walked for repeated
-// member names, and their members are not narrowed to their exact names.
-// challengeResponse itself is fixture format, read like the rest of the
-// fixture. The Python verifier's _PROTOCOL_MESSAGES holds the same paths.
+// member names on its path from the top-level object. parseFixture does not
+// walk their values for repeated member names: inside a body a name written
+// twice is a verdict, which memberNameDefect gives before check 1, not a
+// load error. challengeResponse itself is fixture format, read like the rest
+// of the fixture. The Python verifier's _PROTOCOL_MESSAGES holds the same
+// paths.
 var protocolMessages = [][]string{{"challengeResponse", "challenge"}, {"challengeResponse", "response"}}
-
-// protocolMessageTypes are the decode targets of the protocolMessages members.
-var protocolMessageTypes = map[reflect.Type]bool{
-	reflect.TypeOf(ChallengeBody{}): true,
-	reflect.TypeOf(ResponseBody{}):  true,
-}
 
 // parseFixture decodes a fixture file. A JSON object outside the two §5.1
 // bodies that writes one member name twice is a load error: the verifier
 // state, expected outcome or body it carries has no single reading, and
 // encoding/json would decode both copies into one struct, keeping a member
 // the later copy omits, where the Python verifier reads the later copy
-// alone. Outside the two bodies each member is read under its exact name
-// (exactMembers). A file that is not JSON fails with the error json.Unmarshal
+// alone. Each member, inside the two bodies too, is read under its exact
+// name (exactMembers). A file that is not JSON fails with the error json.Unmarshal
 // reports for it. A challengeResponse fixture whose verifierState is missing
 // or is not an object is a *memberError, and so is a fixture of another
 // fixtureType whose verifierState is neither an object nor null, and a
@@ -533,16 +531,13 @@ func (w *memberWalk) walkAt(skip [][]string, s pathSegment) (string, bool, error
 // case-insensitively, so on its own it decodes VerifierState as
 // verifierState; the Python verifier reads each member by its exact name, so
 // in both verifiers such a member is not the fixture member, which is then
-// absent. The values of the two §5.1 bodies (protocolMessageTypes) are
-// returned as written. The members kept stay in document order. A value that
-// is not the JSON type t needs is returned unchanged, for the decode to
-// reject.
+// absent. Inside the two §5.1 bodies such a member is also a name the body's
+// section does not give it, which memberNameDefect rejects before check 1.
+// The members kept stay in document order. A value that is not the JSON type
+// t needs is returned unchanged, for the decode to reject.
 func exactMembers(raw json.RawMessage, t reflect.Type) json.RawMessage {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
-	}
-	if protocolMessageTypes[t] {
-		return raw
 	}
 	switch t.Kind() {
 	case reflect.Struct:
@@ -644,6 +639,183 @@ func arrayElements(raw json.RawMessage) ([]json.RawMessage, bool) {
 		return nil, false
 	}
 	return elems, true
+}
+
+// ---------------------------------------------------------------------------
+// member names of the two §5.1 bodies (MUST match the Python verifier)
+// ---------------------------------------------------------------------------
+
+// protocolMessageBodies are the two §5.1 bodies in the order the member-name
+// rule reads them, each with the name a reason gives it, its protocolMessages
+// path and the member names its section gives it: AIP §5.1.1 for the
+// challenge body and §5.1.2 for the response body, the JSON names of
+// ChallengeBody's and ResponseBody's fields. The Python verifier's
+// _PROTOCOL_MESSAGE_BODIES holds the same bodies in the same order, with the
+// same names.
+var protocolMessageBodies = []struct {
+	name    string
+	path    []string
+	members map[string]bool
+}{
+	{"challenge", protocolMessages[0], fieldNames(reflect.TypeOf(ChallengeBody{}))},
+	{"response", protocolMessages[1], fieldNames(reflect.TypeOf(ResponseBody{}))},
+}
+
+// fieldNames is the set of member names encoding/json decodes into the
+// fields of the struct type t.
+func fieldNames(t reflect.Type) map[string]bool {
+	names := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		if name, decoded := memberName(t.Field(i)); decoded {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// memberNameDefect applies the AIP §5.1.4 rule on the member names of the
+// two §5.1 bodies in the fixture text raw, which runs before check 1. First
+// the duplicate test: no JSON object in the challenge body, then in the
+// response body, writes one member name twice (repeatedBodyMember). Then the
+// defined-name test: each member of the challenge body, then of the response
+// body, read in document order, has a name that the body's section gives it
+// (protocolMessageBodies). Names are compared code point for code point after
+// JSON escapes are resolved, never folded. The first defect decides: it
+// returns the REJECT [PARSE_ERROR] result naming it, and whether there is
+// one. A body that is missing or is not a JSON object holds no member name
+// to test. The Python verifier's _member_name_defect returns the same result.
+func memberNameDefect(raw []byte) (result, bool) {
+	bodies := make([]json.RawMessage, len(protocolMessageBodies))
+	for i, body := range protocolMessageBodies {
+		if value, ok := memberAt(raw, body.path); ok && jsonType(value) == "an object" {
+			bodies[i] = value
+		}
+	}
+	for i, body := range protocolMessageBodies {
+		if name, ok := repeatedBodyMember(bodies[i]); ok {
+			return memberNameResult(body.name, "duplicate", name), true
+		}
+	}
+	for i, body := range protocolMessageBodies {
+		members, _ := objectMembers(bodies[i])
+		for _, m := range members {
+			if !body.members[m.name] {
+				return memberNameResult(body.name, "undefined", m.name), true
+			}
+		}
+	}
+	return result{}, false
+}
+
+// memberNameResult is the REJECT [PARSE_ERROR] result for the member name of
+// body that the member-name rule refuses as defect, "duplicate" or
+// "undefined". The reason writes the name as strconv.QuoteToASCII writes it.
+func memberNameResult(body, defect, name string) result {
+	return result{
+		verdict:        "REJECT",
+		rejectCategory: "PARSE_ERROR",
+		reason:         fmt.Sprintf("%s contains %s member %s (member names are compared exactly, after JSON escapes are resolved)", body, defect, strconv.QuoteToASCII(name)),
+	}
+}
+
+// memberAt returns the value at path, the member names that lead to it from
+// the top-level object of the JSON text raw, each read under its exact name,
+// and whether there is one.
+func memberAt(raw []byte, path []string) (json.RawMessage, bool) {
+	value := json.RawMessage(raw)
+	for _, name := range path {
+		members, ok := objectMembers(value)
+		if !ok {
+			return nil, false
+		}
+		found := false
+		for _, m := range members {
+			if m.name == name {
+				value, found = m.value, true
+				break
+			}
+		}
+		if !found {
+			return nil, false
+		}
+	}
+	return value, true
+}
+
+// repeatedBodyMember returns the member name the duplicate test names in the
+// §5.1 body raw, and whether there is one: of the JSON objects in raw that
+// write a member name twice, the one that opens first in the text, and in it
+// the name whose second occurrence comes first. Names are compared after
+// JSON unescaping, in which encoding/json decodes an unpaired surrogate
+// escape to U+FFFD, and never folded. The Python verifier's
+// _repeated_body_member names the same member.
+func repeatedBodyMember(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// Without UseNumber, Token stops with an error at a number such as 1e400
+	// that does not fit a float64, and a repeat after it would go unseen.
+	dec.UseNumber()
+	w := bodyWalk{dec: dec, first: -1}
+	if w.walk() != nil {
+		return "", false
+	}
+	return w.name, w.first >= 0
+}
+
+// bodyWalk is the state of one repeatedBodyMember walk: the number of
+// objects opened so far, and the open index and repeated name of the object
+// that opens first of those found to write a name twice (first is -1 while
+// there is none).
+type bodyWalk struct {
+	dec    *json.Decoder
+	opened int
+	first  int
+	name   string
+}
+
+// walk reads the next JSON value from dec. An object's repeat is recorded
+// when the object closes, after the objects nested in it, so the comparison
+// of open indexes decides which object is named.
+func (w *bodyWalk) walk() error {
+	tok, err := w.dec.Token()
+	if err != nil {
+		return err
+	}
+	switch tok {
+	case json.Delim('{'):
+		index := w.opened
+		w.opened++
+		seen := map[string]bool{}
+		repeat, repeated := "", false
+		for w.dec.More() {
+			if tok, err = w.dec.Token(); err != nil {
+				return err
+			}
+			name, _ := tok.(string)
+			if seen[name] && !repeated {
+				repeat, repeated = name, true
+			}
+			seen[name] = true
+			if err = w.walk(); err != nil {
+				return err
+			}
+		}
+		if repeated && (w.first < 0 || index < w.first) {
+			w.first, w.name = index, repeat
+		}
+	case json.Delim('['):
+		for w.dec.More() {
+			if err = w.walk(); err != nil {
+				return err
+			}
+		}
+	default:
+		return nil
+	}
+	_, err = w.dec.Token() // the closing } or ]
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -863,7 +1035,10 @@ type result struct {
 // verifierState.clockRfc3339 check 3 reads is a string parseRFC3339 does not
 // read, the result is a fixtureError naming that member instead of a
 // verdict; checkVerifierState refuses the other verifierState values the
-// checks cannot use before the fixture reaches them.
+// checks cannot use before the fixture reaches them. runFixture applies the
+// rule on the bodies' member names (memberNameDefect) before check 1, so a
+// transcript the checks read has each body member under a name its section
+// gives the body, once.
 func verifyChallengeResponse(cr *ChallengeResponse, vs VerifierState) result {
 	// (1) The response echoes the challenge body, whose canonical payload the
 	// signature covers, and the signature verifies
@@ -1140,7 +1315,10 @@ func runFixture(w io.Writer, path string, read func(string) ([]byte, error)) boo
 		return false
 	}
 
-	r := verifyChallengeResponse(f.ChallengeResponse, f.VerifierState)
+	r, refused := memberNameDefect(b)
+	if !refused {
+		r = verifyChallengeResponse(f.ChallengeResponse, f.VerifierState)
+	}
 	if r.fixtureError != "" {
 		fmt.Fprintf(w, "FAIL  %s\n       fixture error: %s\n", path, r.fixtureError)
 		return false

@@ -9,11 +9,13 @@ pinned verifierState.
 Exit code is 0 if every fixture's observed result matches the expected
 result AND the rejection category matches (when declared).
 
-Outside the two §5.1 bodies (challengeResponse.challenge and
-challengeResponse.response) a fixture's members are read under their exact
-names (VerifierState is not verifierState), and a fixture that writes one
-member name twice in the same JSON object fails to load on both verifiers,
-which counts as a fail (exit code 1).
+A fixture's members are read under their exact names (VerifierState is not
+verifierState). Outside the two §5.1 bodies (challengeResponse.challenge
+and challengeResponse.response) a fixture that writes one member name twice
+in the same JSON object fails to load on both verifiers, which counts as a
+fail (exit code 1). Inside them, before check 1, a JSON object that writes
+one member name twice, or a body member whose name AIP §5.1.1 or §5.1.2
+does not give that body, is REJECT [PARSE_ERROR] (_member_name_defect).
 
 A file whose top-level value is not a JSON object fails to load. A
 challengeResponse fixture whose verifierState is missing or is not an
@@ -493,7 +495,9 @@ def _emit_rfc3339(t: _Instant) -> str:
 
 # The fixture members that hold the protocol messages under test: the two §5.1
 # bodies inside challengeResponse, each by the member names on its path from
-# the top-level object. Their values are not walked for repeated member names;
+# the top-level object. load_fixture does not walk their values for repeated
+# member names: inside a body a name written twice is a verdict, which
+# _member_name_defect gives before check 1, not a load error.
 # challengeResponse itself is fixture format, walked like the rest of the
 # fixture. The Go verifier's protocolMessages holds the same paths.
 _PROTOCOL_MESSAGES = (("challengeResponse", "challenge"), ("challengeResponse", "response"))
@@ -604,9 +608,9 @@ def load_fixture(path: Path) -> dict:
     verifier state, expected outcome or body it carries has no single
     reading, and json.loads would keep the later copy alone where the Go
     verifier's encoding/json keeps a member the later copy omits. Members are
-    read under their exact names, as the Go verifier reads them outside the
-    two bodies. A file whose top-level value is not a JSON object raises
-    ValueError naming the value's JSON type."""
+    read under their exact names, as the Go verifier reads them. A file whose
+    top-level value is not a JSON object raises ValueError naming the value's
+    JSON type."""
     f = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_JSONObject.from_pairs)
     repeated = _repeated_member("", f, _PROTOCOL_MESSAGES)
     if repeated is not None:
@@ -614,6 +618,96 @@ def load_fixture(path: Path) -> dict:
     if not isinstance(f, dict):
         raise ValueError(f"the top-level value is {_json_type(f)}, not an object")
     return f
+
+
+# ---------------------------------------------------------------------------
+# member names of the two §5.1 bodies (MUST match the Go verifier)
+# ---------------------------------------------------------------------------
+
+# The two §5.1 bodies in the order the member-name rule reads them, each with
+# the name a reason gives it, which is also its member name in
+# challengeResponse, and the member names its section gives it: AIP §5.1.1
+# for the challenge body and §5.1.2 for the response body. The Go verifier's
+# protocolMessageBodies holds the same bodies in the same order, with the
+# same names.
+_PROTOCOL_MESSAGE_BODIES = (
+    ("challenge", frozenset(("challenge", "agentDid", "nonce", "issuedAt", "expiresAt", "issuerDid"))),
+    ("response", frozenset(("agentDid", "challenge", "nonce", "issuedAt", "expiresAt",
+                            "signature", "publicKey", "keyId", "signedAt", "algorithm"))),
+)
+
+
+def _object_pairs(obj: dict) -> List[Tuple[str, Any]]:
+    """The members of a JSON object, in document order, repeats included
+    when load_fixture read it."""
+    return obj.pairs if isinstance(obj, _JSONObject) else list(obj.items())
+
+
+def _repeated_body_member(body: Any) -> Optional[str]:
+    """The member name the duplicate test names in a §5.1 body, or None: of
+    the JSON objects in body that write a member name twice, the one that
+    opens first in the text, and in it the name whose second occurrence
+    comes first, as the Go verifier's repeatedBodyMember names it. Names are
+    compared as encoding/json unescapes them (_UNPAIRED_SURROGATE) and never
+    folded."""
+    # A depth-first walk that takes each object before the values of its
+    # members reaches the objects in the order they open in the text. An
+    # explicit stack rather than recursion, as in _repeated_member.
+    stack: List[Any] = [body]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, list):
+            stack.extend(reversed(item))
+        elif isinstance(item, dict):
+            pairs = _object_pairs(item)
+            seen: Set[str] = set()
+            for key, _ in pairs:
+                name = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
+                if name in seen:
+                    return name
+                seen.add(name)
+            stack.extend(value for _, value in reversed(pairs))
+    return None
+
+
+def _member_name_defect(cr: Any) -> Optional[Result]:
+    """The AIP §5.1.4 rule on the member names of the two §5.1 bodies in
+    challengeResponse cr, which runs before check 1. First the duplicate
+    test: no JSON object in the challenge body, then in the response body,
+    writes one member name twice (_repeated_body_member). Then the
+    defined-name test: each member of the challenge body, then of the
+    response body, read in document order, has a name that the body's
+    section gives it (_PROTOCOL_MESSAGE_BODIES). Names are compared code
+    point for code point after JSON escapes are resolved, never folded. The
+    first defect decides: the REJECT [PARSE_ERROR] result naming it, or None
+    when there is none. A body that is missing or is not a JSON object holds
+    no member name to test. The Go verifier's memberNameDefect returns the
+    same result."""
+    if not isinstance(cr, dict):
+        return None
+    bodies = [(name, defined, cr.get(name)) for name, defined in _PROTOCOL_MESSAGE_BODIES]
+    bodies = [(name, defined, body) for name, defined, body in bodies if isinstance(body, dict)]
+    for name, _, body in bodies:
+        repeated = _repeated_body_member(body)
+        if repeated is not None:
+            return _member_name_result(name, "duplicate", repeated)
+    for name, defined, body in bodies:
+        for key, _ in _object_pairs(body):
+            member = _UNPAIRED_SURROGATE.sub(chr(0xFFFD), key)
+            if member not in defined:
+                return _member_name_result(name, "undefined", member)
+    return None
+
+
+def _member_name_result(body: str, defect: str, name: str) -> Result:
+    """The REJECT [PARSE_ERROR] result for the member name of body that the
+    member-name rule refuses as defect, "duplicate" or "undefined". The
+    reason writes the name as _quote_ascii writes it."""
+    return Result(
+        "REJECT", "PARSE_ERROR",
+        f"{body} contains {defect} member {_quote_ascii(name)} "
+        "(member names are compared exactly, after JSON escapes are resolved)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +844,9 @@ def _check_fixture(path: Path, f: dict) -> bool:
         print(f"FAIL  {path}\n       challengeResponse payload missing")
         return False
 
-    r = verify_challenge_response(f["challengeResponse"], _member(f, "", "verifierState"))
+    r = _member_name_defect(f["challengeResponse"])
+    if r is None:
+        r = verify_challenge_response(f["challengeResponse"], _member(f, "", "verifierState"))
     expected = f["expected"]["verifyResult"]
     observed_detail = r.verdict
     if r.verdict == "REJECT":

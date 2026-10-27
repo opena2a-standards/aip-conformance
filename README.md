@@ -3,7 +3,7 @@
 Conformance fixtures and reference verifiers for the
 [Agent Identity Protocol (AIP) v1.0.0-draft](https://github.com/opena2a-org/agent-identity-protocol).
 
-**Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (9) and
+**Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (14) and
 §6.1 trust-score composition fixtures (3) shipped, 2 verifiers,
 `MANIFEST.sha256` pinned. AIP §6.4 (VC `AgentTrustCredential`) conformance
 is covered transitively via
@@ -24,12 +24,12 @@ first output line repeats it with the module path, then one block per
 fixture follows and a summary:
 
 ```text
-fixtures: 12 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
+fixtures: 17 embedded in github.com/opena2a-standards/aip-conformance v0.3.0
 PASS  fixtures/challenge-response-echoed-agent-differs.json
        expected: REJECT [SIGNATURE_INVALID]
        observed: REJECT[SIGNATURE_INVALID: response.agentDid "did:opena2a:agent:agent_conformance_test_002" does not match challenge.agentDid "did:opena2a:agent:agent_conformance_test_001"]
 ...
-summary: 12 pass, 0 fail (12 fixtures)
+summary: 17 pass, 0 fail (17 fixtures)
 ```
 
 Name the version: `@latest` does not reach the root module through the
@@ -103,6 +103,11 @@ per vector. Fixture bytes are pinned in
 | `challenge-response-other-agent-key` | REJECT (UNTRUSTED_KEY) | a valid signature by a key bound to another agent |
 | `challenge-response-untrusted-issuer` | REJECT (UNTRUSTED_ISSUER) | a challenge whose `issuerDid` is not in `verifierState.trustedIssuers` |
 | `challenge-response-no-trusted-issuers` | REJECT (UNTRUSTED_ISSUER) | a `verifierState` with no `trustedIssuers` member, which trusts no issuer |
+| `challenge-response-duplicate-member-response` | REJECT (PARSE_ERROR) | a response body that writes `agentDid` twice, with two different DIDs |
+| `challenge-response-duplicate-member-challenge` | REJECT (PARSE_ERROR) | a challenge body that writes `nonce` twice with one value, the second time as `n\u006fnce` |
+| `challenge-response-case-variant-member` | REJECT (PARSE_ERROR) | a response member named `publicKey` with U+212A KELVIN SIGN in place of the `K` |
+| `challenge-response-undefined-member-non-ascii` | REJECT (PARSE_ERROR) | a response member named `issuedAt` with U+0131 LATIN SMALL LETTER DOTLESS I in place of the `i` |
+| `challenge-response-undefined-member-ascii` | REJECT (PARSE_ERROR) | a response member named `issued_at` |
 | `trust-score-unscored-zero-event-agent` | `UNSCORED` | included weight below the §6.1 threshold of 0.50 |
 | `trust-score-measured-six-factors-capped` | `MEASURED` | the neutral-imputed ceiling binds |
 | `trust-score-measured-at-included-weight-0.50` | `MEASURED` | included weight at the threshold; the threshold is strict |
@@ -123,7 +128,7 @@ This is the section that future reviewers, second-implementation authors,
 and A2A coordination-map readers should read before forming judgments.
 
 - **Canonical form:** the agent signs 5 pipe-delimited fields, not the full JSON; `publicKey`, `keyId`, `signedAt` and `algorithm` are unsigned. The response's echo of each signed field must equal the challenge body's, and the checks read the challenge body.
-- **Wire format:** challenge and response bodies pin fields beyond AIP-SPEC §5.1, as suite contracts, not spec changes.
+- **Wire format:** AIP-SPEC §5.1.1 and §5.1.2 give the challenge and response bodies their members; a body that writes a member name twice, or has a member those sections do not give it, is rejected before the checks (`PARSE_ERROR`).
 - **Replay:** the verifier is stateless; the replay fixture declares prior nonces in `verifierState.seenNonces`.
 - **Test keys:** `issuer-primary` is the same keypair as in atx-conformance and atp-conformance; all seeds are TEST-ONLY.
 - **DID resolution:** not exercised; DIDs are opaque strings per AIP-SPEC §3.2.
