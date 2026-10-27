@@ -1274,7 +1274,8 @@ func TestNonASCIIFieldGetsThePythonVerdict(t *testing.T) {
 // fixture format around the two §5.1 bodies, so a member it writes twice
 // fails the fixture to load with the line of the other repeated members, and
 // a member spelled in another case is not read as challenge or response. A
-// member repeated inside a body is not a load error. A body is the member
+// member repeated inside a body is not a load error: the fixture loads, and
+// the member-name rule rejects the transcript before check 1. A body is the member
 // challenge or response of the top-level challengeResponse, so a repeat in a
 // top-level member named challengeResponse.challenge or
 // challengeResponse.response, or in challengeResponse.challenge under a
@@ -1338,7 +1339,6 @@ func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 	accepts := []struct{ name, doc string }{
 		{"Response beside response, with another signature", withContainer(m("challenge", challenge), m("response", response), m("Response", with(response, "signature", probeBytes(0, 64))))},
 		{"Challenge beside challenge, with another nonce", withContainer(m("challenge", challenge), m("Challenge", with(challenge, "nonce", probeBytes(3, 16))), m("response", response))},
-		{"keyId twice inside the response body, both copies the same", withContainer(m("challenge", challenge), m("response", strings.Replace(response, keyID, keyID+", "+keyID, 1)))},
 	}
 	for _, tc := range accepts {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1348,6 +1348,144 @@ func TestRepeatedChallengeResponseMemberIsALoadError(t *testing.T) {
 				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
 			}
 		})
+	}
+
+	t.Run("keyId twice inside the response body, both copies the same", func(t *testing.T) {
+		path, code, out := runText(t, withContainer(m("challenge", challenge), m("response", strings.Replace(response, keyID, keyID+", "+keyID, 1))))
+		want := "FAIL  " + path + "\n       expected: ACCEPT\n       observed: REJECT[PARSE_ERROR: " + memberNameReason("response", "duplicate", `"keyId"`) + "]\n\nsummary: 0 pass, 1 fail (1 fixtures)\n"
+		if code != 1 || out != want {
+			t.Errorf("exit %d, stdout:\n%s\nwant exit 1, stdout:\n%s", code, out, want)
+		}
+	})
+}
+
+// memberNameReason is the PARSE_ERROR reason for a member name of body,
+// written as quoted, that the member-name rule refuses as defect.
+func memberNameReason(body, defect, quoted string) string {
+	return body + " contains " + defect + " member " + quoted + " (member names are compared exactly, after JSON escapes are resolved)"
+}
+
+// TestBodyMemberNameRuleRejectsBeforeCheck1: before check 1, an object in
+// either §5.1 body that writes one member name twice, or a body member whose
+// name §5.1.1 or §5.1.2 does not give that body, is REJECT [PARSE_ERROR].
+// Names are compared code point for code point after JSON escapes are
+// resolved, never folded, and the reason writes the name as
+// strconv.QuoteToASCII writes it. The duplicate test runs over the challenge
+// body, then the response body, and before the defined-name test over the
+// two in the same order. In a body the duplicate test names the object that
+// opens first, and in it the name whose second occurrence comes first; the
+// defined-name test names the first undefined member in document order. A
+// member is decoded only under its exact name, so an undefined member of
+// another JSON type does not stop the fixture loading. The cases are built
+// from the valid fixture. ../python/test_verify.py builds the same cases and
+// expects the same lines.
+func TestBodyMemberNameRuleRejectsBeforeCheck1(t *testing.T) {
+	raw, err := fs.ReadFile(aipconformance.Fixtures, embeddedFixtureDir+"/challenge-response-valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	container := memberText(t, doc, "challengeResponse")
+	var bodies map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(container, `"challengeResponse": `)), &bodies); err != nil {
+		t.Fatal(err)
+	}
+	challenge, response := string(bodies["challenge"]), string(bodies["response"])
+	// value returns the value of the member name of body, as written.
+	value := func(body, name string) string {
+		return strings.TrimPrefix(memberText(t, body, name), strconv.Quote(name)+": ")
+	}
+	// after returns body with members, each written as text, added after its
+	// member name.
+	after := func(body, name string, members ...string) string {
+		member := memberText(t, body, name)
+		return strings.Replace(body, member, member+", "+strings.Join(members, ", "), 1)
+	}
+	expected := memberText(t, doc, "expected")
+	clock := memberText(t, doc, "clockRfc3339")
+	// fixture returns the valid fixture with the two bodies written as given
+	// and the expected outcome REJECT [PARSE_ERROR].
+	fixture := func(challenge, response string) string {
+		text := strings.Replace(doc, container, `"challengeResponse": {"challenge": `+challenge+`, "response": `+response+`}`, 1)
+		return strings.Replace(text, expected, `"expected": {"verifyResult": "REJECT", "rejectCategory": "PARSE_ERROR"}`, 1)
+	}
+	agentTwice := after(response, "agentDid", `"agentDid": "did:opena2a:agent:agent_conformance_test_002"`)
+	nonceEscaped := after(challenge, "nonce", "\"n\\u006fnce\": "+value(challenge, "nonce"))
+	keyIDTwice := after(response, "keyId", `"keyId": `+value(response, "keyId"))
+	nonceCase := after(challenge, "nonce", `"Nonce": `+value(challenge, "nonce"))
+
+	cases := []struct{ name, doc, reason string }{
+		{"a response member written twice, the second time with another DID", fixture(challenge, agentTwice),
+			memberNameReason("response", "duplicate", `"agentDid"`)},
+		{"a challenge member written twice with one value, the second name with an escape", fixture(nonceEscaped, response),
+			memberNameReason("challenge", "duplicate", `"nonce"`)},
+		{"a response member written twice with one value", fixture(challenge, keyIDTwice),
+			memberNameReason("response", "duplicate", `"keyId"`)},
+		{"publicKey with U+212A KELVIN SIGN in place of the K", fixture(challenge, after(response, "publicKey", "\"public\\u212aey\": "+value(response, "publicKey"))),
+			memberNameReason("response", "undefined", "\"public\\u212aey\"")},
+		{"issuedAt with U+0131 LATIN SMALL LETTER DOTLESS I in place of the i", fixture(challenge, after(response, "issuedAt", "\"\\u0131ssuedAt\": "+value(response, "issuedAt"))),
+			memberNameReason("response", "undefined", "\"\\u0131ssuedAt\"")},
+		{"issued_at", fixture(challenge, after(response, "issuedAt", `"issued_at": `+value(response, "issuedAt"))),
+			memberNameReason("response", "undefined", `"issued_at"`)},
+		{"PublicKey holding a number", fixture(challenge, after(response, "publicKey", `"PublicKey": 7`)),
+			memberNameReason("response", "undefined", `"PublicKey"`)},
+		{"a challenge member named Nonce", fixture(nonceCase, response),
+			memberNameReason("challenge", "undefined", `"Nonce"`)},
+		{"a member written twice in each body: the challenge body is tested first", fixture(nonceEscaped, agentTwice),
+			memberNameReason("challenge", "duplicate", `"nonce"`)},
+		{"an undefined challenge member and a response member written twice: the duplicate test runs first", fixture(nonceCase, keyIDTwice),
+			memberNameReason("response", "duplicate", `"keyId"`)},
+		{"two undefined members: the first in document order", fixture(challenge, after(after(response, "algorithm", `"a-last": 2`), "agentDid", `"x-first": 1`)),
+			memberNameReason("response", "undefined", `"x-first"`)},
+		{"a name written twice in an object an undefined member holds", fixture(challenge, after(response, "algorithm", `"extension": {"a": 1, "a": 2}`)),
+			memberNameReason("response", "duplicate", `"a"`)},
+		{"the body repeats a name after a nested object does: the object that opens first is named", fixture(challenge, after(after(response, "agentDid", `"extension": {"a": 1, "a": 2}`), "keyId", `"keyId": `+value(response, "keyId"))),
+			memberNameReason("response", "duplicate", `"keyId"`)},
+		{"two names written twice in one object: the second occurrence that comes first", fixture(challenge, after(response, "algorithm", `"algorithm": "Ed25519"`, `"keyId": `+value(response, "keyId"))),
+			memberNameReason("response", "duplicate", `"algorithm"`)},
+		{"two unpaired surrogate escapes, each decoded to U+FFFD", fixture(challenge, after(response, "algorithm", "\"\\ud800\": 1", "\"\\udbff\": 2")),
+			memberNameReason("response", "duplicate", "\"\\ufffd\"")},
+		{"one unpaired surrogate escape", fixture(challenge, after(response, "algorithm", "\"\\ud800\": 1")),
+			memberNameReason("response", "undefined", "\"\\ufffd\"")},
+		{"before check 3 reads a clock that is not a date-time", strings.Replace(fixture(challenge, agentTwice), clock, `"clockRfc3339": "not-a-time"`, 1),
+			memberNameReason("response", "duplicate", `"agentDid"`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, code, out := runText(t, tc.doc)
+			if want := passBlock(path, "PARSE_ERROR", tc.reason); code != 0 || out != want {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit 0, stdout:\n%s", code, out, want)
+			}
+		})
+	}
+}
+
+// TestBodyMemberNamesAreTheSchemaProperties: the member names the
+// member-name rule gives each §5.1 body are the properties of its vendored
+// AIP schema, which closes the body (additionalProperties false).
+func TestBodyMemberNamesAreTheSchemaProperties(t *testing.T) {
+	for _, body := range protocolMessageBodies {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "schemas", "vendor", "agent-identity-protocol", body.name+"-body-v1.schema.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties           map[string]json.RawMessage `json:"properties"`
+			AdditionalProperties *bool                      `json:"additionalProperties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+			t.Errorf("%s body schema: additionalProperties is not false", body.name)
+		}
+		names := map[string]bool{}
+		for name := range schema.Properties {
+			names[name] = true
+		}
+		if !maps.Equal(names, body.members) {
+			t.Errorf("%s body: the rule gives %v, the schema %v", body.name, body.members, names)
+		}
 	}
 }
 
