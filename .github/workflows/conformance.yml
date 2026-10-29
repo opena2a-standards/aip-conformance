@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python verifier dependency
-        run: python3 -m pip install "cryptography>=42.0.0"
+        run: python3 -m pip install -r verifiers/python/requirements.txt jsonschema -c .github/ci-constraints.txt
 
       - name: Go verifier over fixtures
         working-directory: verifiers/go
@@ -43,9 +43,33 @@ jobs:
         working-directory: verifiers/python
         run: python3 verify.py ../../fixtures
 
+      - name: Go unit tests, both modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./... 2>&1 | tee go-test.log
+          (cd scripts/generate-fixtures && go test -count=1 -v ./...) 2>&1 | tee -a go-test.log
+          ! grep -q -- '--- SKIP' go-test.log
+
+      - name: Python unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd verifiers/python && python3 -m unittest -v) 2>&1 | tee py-test.log
+          python3 -m unittest discover -v -s tests -t tests 2>&1 | tee -a py-test.log
+          ! grep -q ' \.\.\. skipped' py-test.log
+
+      - name: Both verifiers print the same bytes
+        shell: bash
+        # Compare standard output only: go run writes its own "exit status 1" to stderr.
+        run: |
+          set -euo pipefail
+          diff <(cd verifiers/go && go run . ../../fixtures) <(cd verifiers/python && python3 verify.py ../../fixtures)
+          diff <(cd verifiers/go && go run . ../../fixtures/load-errors; echo "exit $?") <(cd verifiers/python && python3 verify.py ../../fixtures/load-errors; echo "exit $?")
+          rc=0; (cd verifiers/python && python3 verify.py ../../fixtures/load-errors > /dev/null) || rc=$?; test "$rc" -eq 1
+
       - name: Schema validation (fixtures vs vendored spec schemas)
         run: |
-          python3 -m pip install "jsonschema>=4.21"
           python3 scripts/schema_validation.py
 
       - name: Vendored schema drift gate (pinned agent-identity-protocol ref)
