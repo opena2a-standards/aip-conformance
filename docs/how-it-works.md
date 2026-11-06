@@ -113,7 +113,12 @@ runs the gates below on pull requests and on pushes to `main`; the
    ([`scripts/conformance_profile.py --check`](../scripts/conformance_profile.py)):
    the verifier status rows, and the sibling-repositories row's version (the
    one the README status line declares), fixture count per spec section and
-   verifier count.
+   verifier count. The same command compares each `AIP vX.Y.Z` citation in
+   the README, the `AIP spec` row of [versioning.md](versioning.md) and that
+   sibling row's Spec cell with the `spec.version` that `conformance.json`
+   pins. It fails when one names another version, when the README or that
+   Spec cell holds no such citation, and when versioning.md has no
+   `AIP spec` row.
 5. Schema validation
    ([`scripts/schema_validation.py`](../scripts/schema_validation.py)): every
    fixture's `challengeResponse.challenge` / `.response` must validate against
