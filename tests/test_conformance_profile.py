@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Regression tests for scripts/conformance_profile.py: the docs/ecosystem.md
-row gates and the command-line arguments.
+row gates, the AIP spec version gate and the command-line arguments.
 
-The gate tests write an edited copy of docs/ecosystem.md to a temporary
-directory and point the gates at the copy; the command-line tests point the
-script's output at a conformance.json path in a temporary directory. The
-tracked files are never modified.
+The gate tests write an edited copy of docs/ecosystem.md, README.md or
+docs/versioning.md to a temporary directory and point the gates at the copy;
+the command-line tests point the script's output at a conformance.json path
+in a temporary directory. The tracked files are never modified.
 
 Usage:
     python3 -m unittest discover -s tests -v
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,8 @@ GO = "verifiers/go"
 ATX = "atx-conformance"
 ATP = "atp-conformance"
 SIBLINGS_HEADING = "## Sibling repositories"
+# An AIP spec version no document in this repository cites.
+OTHER_VERSION = "9.9.9-draft"
 
 
 def run_check(lines: list[str], gate: Callable[[], list[str]]) -> tuple[list[str], int, str]:
@@ -190,6 +193,364 @@ class SiblingCountGateTest(unittest.TestCase):
         problems, code, _ = self.run_gate(lines)
         self.assertEqual(problems, [f"docs/ecosystem.md: no '{SIBLINGS_HEADING}' section"])
         self.assertEqual(code, 1)
+
+
+class SpecVersionGateTest(unittest.TestCase):
+    """README.md, the docs/versioning.md `AIP spec` row and this repository's
+    sibling-repositories row cite the AIP spec version conformance.json pins."""
+
+    def setUp(self) -> None:
+        self.pinned = conformance_profile.SUITE["spec"]["version"]
+        self.assertNotEqual(self.pinned, OTHER_VERSION)
+        self.pins = f"conformance.json pins spec.version {self.pinned}"
+        self.readme = conformance_profile.README.read_text(encoding="utf-8")
+        self.versioning = (REPO_ROOT / "docs" / "versioning.md").read_text(encoding="utf-8")
+        self.ecosystem = conformance_profile.ECOSYSTEM.read_text(encoding="utf-8")
+        self.readme_citation = f"(AIP) v{self.pinned}"
+        self.versioning_row = f"| AIP spec | v{self.pinned} |"
+        self.sibling_cell = f"| AIP v{self.pinned} identity protocol |"
+        self.assertIn(self.readme_citation, self.readme)
+        self.assertEqual(self.versioning.count(self.versioning_row), 1)
+        self.assertEqual(self.ecosystem.count(self.sibling_cell), 1)
+
+    @staticmethod
+    def line_of(text: str, needle: str) -> int:
+        """Return the 1-based number of the line `needle` first starts on."""
+        return text.count("\n", 0, text.index(needle)) + 1
+
+    def check(self, attr: str, text: str) -> tuple[int, list[str]]:
+        """Run `conformance_profile.py --check` with the script's `attr` path
+        pointed at a temporary file holding `text`. Return the exit code and
+        the lines printed after `conformance.json is current`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp) / "doc.md"
+            doc.write_text(text, encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch.object(conformance_profile, attr, doc), mock.patch.object(
+                sys, "argv", ["conformance_profile.py", "--check"]
+            ), contextlib.redirect_stdout(out):
+                code = conformance_profile.main()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "conformance.json is current")
+        return code, lines[1:]
+
+    def readme_problems(self, text: str) -> list[str]:
+        """Return what the gate reports about a README.md holding `text`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            readme = Path(tmp) / "README.md"
+            readme.write_text(text, encoding="utf-8")
+            with mock.patch.object(conformance_profile, "README", readme):
+                problems = conformance_profile.spec_version_drift()
+        return [problem for problem in problems if problem.startswith("README.md")]
+
+    def stale_readme_message(self, text: str) -> str:
+        return (
+            f"README.md:{self.line_of(text, OTHER_VERSION)}: cites AIP v{OTHER_VERSION}; "
+            f"{self.pins}, so the citation must read 'v{self.pinned}'"
+        )
+
+    def test_current_docs_pass(self) -> None:
+        code, lines = self.check("README", self.readme)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(
+            lines[-1],
+            "README.md, the docs/versioning.md AIP spec row and the docs/ecosystem.md "
+            f"sibling row cite AIP v{self.pinned}, the spec.version conformance.json pins",
+        )
+
+    def test_readme_citing_another_version_is_reported(self) -> None:
+        text = self.readme.replace(self.readme_citation, f"(AIP) v{OTHER_VERSION}", 1)
+        code, lines = self.check("README", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines, [self.stale_readme_message(text)])
+
+    def test_a_later_citation_in_each_form_is_reported(self) -> None:
+        """A citation after a current one is compared too, in each form the
+        gate reads, with a line break before the version included."""
+        for form in (
+            "AIP v{}",
+            "(AIP) v{}",
+            "AIP-SPEC v{}",
+            "AIP spec v{}",
+            "AIP specification v{}",
+            "(AIP)\nv{}",
+            "AIP\nspec\nv{}",
+        ):
+            with self.subTest(form=form):
+                text = f"{self.readme}\nThe fixtures follow {form.format(OTHER_VERSION)}.\n"
+                code, lines = self.check("README", text)
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(lines, [self.stale_readme_message(text)])
+
+    def test_readme_with_no_citation_is_reported(self) -> None:
+        text = re.sub(r"\s+v" + re.escape(self.pinned), "", self.readme)
+        self.assertNotEqual(text, self.readme)
+        code, lines = self.check("README", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"README.md: no 'AIP vX.Y.Z' citation; {self.pins}, "
+                f"so the README must cite 'AIP v{self.pinned}'"
+            ],
+        )
+
+    def test_write_mode_reports_a_stale_citation_in_each_place(self) -> None:
+        """With no argument the script writes the profile, then reports the same lines."""
+        readme = self.readme.replace(self.readme_citation, f"(AIP) v{OTHER_VERSION}", 1)
+        versioning = self.versioning.replace(
+            self.versioning_row, f"| AIP spec | v{OTHER_VERSION} |"
+        )
+        ecosystem = self.ecosystem.replace(
+            self.sibling_cell, f"| AIP v{OTHER_VERSION} identity protocol |"
+        )
+        for attr, text, expected in (
+            ("README", readme, self.stale_readme_message(readme)),
+            (
+                "VERSIONING",
+                versioning,
+                f"docs/versioning.md:{self.line_of(versioning, OTHER_VERSION)}: AIP spec row "
+                f"pins 'v{OTHER_VERSION}'; {self.pins}, "
+                f"so its Version cell must read 'v{self.pinned}'",
+            ),
+            (
+                "ECOSYSTEM",
+                ecosystem,
+                f"docs/ecosystem.md:{self.line_of(ecosystem, OTHER_VERSION)}: aip-conformance "
+                f"(this repo) row cites AIP v{OTHER_VERSION}; {self.pins}, "
+                f"so the citation must read 'v{self.pinned}'",
+            ),
+        ):
+            with self.subTest(attr=attr), tempfile.TemporaryDirectory() as tmp:
+                doc = Path(tmp) / "doc.md"
+                doc.write_text(text, encoding="utf-8")
+                profile = Path(tmp) / "conformance.json"
+                out = io.StringIO()
+                with mock.patch.object(conformance_profile, attr, doc), mock.patch.object(
+                    conformance_profile, "OUT", profile
+                ), mock.patch.object(
+                    sys, "argv", ["conformance_profile.py"]
+                ), contextlib.redirect_stdout(out):
+                    code = conformance_profile.main()
+                    written = profile.exists()
+                self.assertEqual(code, 1, out.getvalue())
+                self.assertTrue(written)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[0].startswith("wrote conformance.json"), lines)
+                self.assertEqual(lines[1:], [expected])
+
+    def test_a_pinned_version_no_citation_can_name_is_reported_alone(self) -> None:
+        for pinned in ("1.2.0-draft (2026-10-06)", "draft-04", "1.2.0-", ""):
+            with self.subTest(pinned=pinned), mock.patch.dict(
+                conformance_profile.SUITE["spec"], {"version": pinned}
+            ):
+                self.assertEqual(
+                    conformance_profile.spec_version_drift(),
+                    [
+                        f"scripts/conformance_profile.py: SUITE pins spec.version {pinned!r}, "
+                        "which no citation can name: a citation is read as a number followed "
+                        "by parts that each open with '.', '-' or '+', as in '1.0.0-draft'"
+                    ],
+                )
+
+    def test_missing_readme_is_reported_as_holding_no_citation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            conformance_profile, "README", Path(tmp) / "README.md"
+        ):
+            problems = conformance_profile.spec_version_drift()
+        self.assertEqual(
+            problems,
+            [
+                f"README.md: no 'AIP vX.Y.Z' citation; {self.pins}, "
+                f"so the README must cite 'AIP v{self.pinned}'"
+            ],
+        )
+
+    def test_missing_versioning_doc_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            conformance_profile, "VERSIONING", Path(tmp) / "versioning.md"
+        ):
+            problems = conformance_profile.spec_version_drift()
+        self.assertEqual(problems, ["docs/versioning.md missing"])
+
+    def test_missing_sibling_row_or_doc_is_left_to_the_sibling_row_gate(self) -> None:
+        row_removed = "".join(
+            line
+            for line in self.ecosystem.splitlines(keepends=True)
+            if self.sibling_cell not in line
+        )
+        self.assertNotEqual(row_removed, self.ecosystem)
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp) / "ecosystem.md"
+            doc.write_text(row_removed, encoding="utf-8")
+            for path, reported in (
+                (
+                    doc,
+                    "docs/ecosystem.md: no sibling-repositories row for "
+                    "aip-conformance (this repo)",
+                ),
+                (Path(tmp) / "absent.md", "docs/ecosystem.md missing"),
+            ):
+                with self.subTest(reported=reported), mock.patch.object(
+                    conformance_profile, "ECOSYSTEM", path
+                ):
+                    self.assertEqual(conformance_profile.spec_version_drift(), [])
+                    self.assertEqual(conformance_profile.sibling_row_drift(), [reported])
+
+    def test_a_version_is_compared_whole(self) -> None:
+        """The pinned version with a part removed or a part added is another version."""
+        shorter = self.pinned[: max(self.pinned.rfind(sep) for sep in ".+-")]
+        self.assertTrue(shorter)
+        longer = [self.pinned + more for more in (".1", "-2", "+errata", "2")]
+        for cited in (shorter, *longer):
+            with self.subTest(cited=cited):
+                self.assertEqual(
+                    self.readme_problems(f"Fixtures for AIP v{cited}\n"),
+                    [
+                        f"README.md:1: cites AIP v{cited}; {self.pins}, "
+                        f"so the citation must read 'v{self.pinned}'"
+                    ],
+                )
+
+    def test_punctuation_after_a_citation_is_not_part_of_the_version(self) -> None:
+        for tail in (".", ",", ";", ":", ")", "](https://example.org).", " and later", "\n"):
+            with self.subTest(tail=tail):
+                self.assertEqual(
+                    self.readme_problems(f"Fixtures for AIP v{self.pinned}{tail}\n"), []
+                )
+
+    def test_versioning_row_pinning_another_version_is_reported(self) -> None:
+        text = self.versioning.replace(self.versioning_row, f"| AIP spec | v{OTHER_VERSION} |")
+        code, lines = self.check("VERSIONING", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"docs/versioning.md:{self.line_of(text, OTHER_VERSION)}: AIP spec row pins "
+                f"'v{OTHER_VERSION}'; {self.pins}, so its Version cell must read 'v{self.pinned}'"
+            ],
+        )
+
+    def test_versioning_cell_holding_more_than_the_version_is_reported(self) -> None:
+        text = self.versioning.replace(
+            self.versioning_row, f"| AIP spec | v{self.pinned} (draft) |"
+        )
+        code, lines = self.check("VERSIONING", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"docs/versioning.md:{self.line_of(text, '| AIP spec |')}: AIP spec row pins "
+                f"'v{self.pinned} (draft)'; {self.pins}, "
+                f"so its Version cell must read 'v{self.pinned}'"
+            ],
+        )
+
+    def test_stale_duplicate_versioning_row_is_reported_in_either_order(self) -> None:
+        current = next(
+            line for line in self.versioning.splitlines() if line.startswith(self.versioning_row)
+        )
+        stale = current.replace(self.versioning_row, f"| AIP spec | v{OTHER_VERSION} |")
+        for pair in (f"{stale}\n{current}", f"{current}\n{stale}"):
+            with self.subTest(stale_first=pair.startswith(stale)):
+                text = self.versioning.replace(current, pair)
+                code, lines = self.check("VERSIONING", text)
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(
+                    lines,
+                    [
+                        f"docs/versioning.md:{self.line_of(text, OTHER_VERSION)}: AIP spec row "
+                        f"pins 'v{OTHER_VERSION}'; {self.pins}, "
+                        f"so its Version cell must read 'v{self.pinned}'"
+                    ],
+                )
+
+    def test_missing_versioning_row_is_reported(self) -> None:
+        text = "".join(
+            line
+            for line in self.versioning.splitlines(keepends=True)
+            if not line.startswith(self.versioning_row)
+        )
+        self.assertNotIn("| AIP spec |", text)
+        code, lines = self.check("VERSIONING", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"docs/versioning.md: no 'AIP spec' row; {self.pins}, so the version "
+                f"pinning table needs the row 'AIP spec | v{self.pinned}'"
+            ],
+        )
+
+    def test_sibling_row_citing_another_version_is_reported(self) -> None:
+        text = self.ecosystem.replace(
+            self.sibling_cell, f"| AIP v{OTHER_VERSION} identity protocol |"
+        )
+        code, lines = self.check("ECOSYSTEM", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"docs/ecosystem.md:{self.line_of(text, OTHER_VERSION)}: aip-conformance "
+                f"(this repo) row cites AIP v{OTHER_VERSION}; {self.pins}, "
+                f"so the citation must read 'v{self.pinned}'"
+            ],
+        )
+
+    def test_sibling_row_citing_no_version_is_reported(self) -> None:
+        cell = "| AIP identity protocol |"
+        text = self.ecosystem.replace(self.sibling_cell, cell)
+        code, lines = self.check("ECOSYSTEM", text)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines,
+            [
+                f"docs/ecosystem.md:{self.line_of(text, cell)}: aip-conformance (this repo) "
+                f"row cites no AIP version in its Spec cell; {self.pins}, "
+                f"so the cell must cite 'AIP v{self.pinned}'"
+            ],
+        )
+
+    def test_stale_duplicate_sibling_row_is_reported_in_either_order(self) -> None:
+        current = next(
+            line for line in self.ecosystem.splitlines() if self.sibling_cell in line
+        )
+        stale = current.replace(
+            self.sibling_cell, f"| AIP v{OTHER_VERSION} identity protocol |"
+        )
+        for pair in (f"{stale}\n{current}", f"{current}\n{stale}"):
+            with self.subTest(stale_first=pair.startswith(stale)):
+                text = self.ecosystem.replace(current, pair)
+                code, lines = self.check("ECOSYSTEM", text)
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(
+                    lines,
+                    [
+                        f"docs/ecosystem.md:{self.line_of(text, OTHER_VERSION)}: "
+                        f"aip-conformance (this repo) row cites AIP v{OTHER_VERSION}; "
+                        f"{self.pins}, so the citation must read 'v{self.pinned}'"
+                    ],
+                )
+
+    def test_a_moved_pin_is_reported_in_each_of_the_three_places(self) -> None:
+        """With another spec.version pinned, the unedited docs are each reported."""
+        with mock.patch.dict(conformance_profile.SUITE["spec"], {"version": OTHER_VERSION}):
+            problems = conformance_profile.spec_version_drift()
+        pins = f"conformance.json pins spec.version {OTHER_VERSION}"
+        for expected in (
+            f"README.md:{self.line_of(self.readme, self.readme_citation)}: cites AIP "
+            f"v{self.pinned}; {pins}, so the citation must read 'v{OTHER_VERSION}'",
+            f"docs/versioning.md:{self.line_of(self.versioning, self.versioning_row)}: AIP spec "
+            f"row pins 'v{self.pinned}'; {pins}, so its Version cell must read 'v{OTHER_VERSION}'",
+            f"docs/ecosystem.md:{self.line_of(self.ecosystem, self.sibling_cell)}: "
+            f"aip-conformance (this repo) row cites AIP v{self.pinned}; {pins}, "
+            f"so the citation must read 'v{OTHER_VERSION}'",
+        ):
+            self.assertIn(expected, problems)
+        self.assertEqual(
+            sorted({problem.split(":")[0] for problem in problems}),
+            ["README.md", "docs/ecosystem.md", "docs/versioning.md"],
+        )
 
 
 class CommandLineTest(unittest.TestCase):

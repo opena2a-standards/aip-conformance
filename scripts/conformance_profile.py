@@ -20,9 +20,17 @@ modes exit 1 when one of those rows holds a standalone number followed, in
 the same clause, by `fixtures` or `verifiers` (`8 fixtures`, `25 conformance
 fixtures`, `2 verifiers`; PINNED_COUNT_RE has the exact form).
 
+Three places cite the AIP spec version by hand: README.md, the `AIP spec`
+row of the table in docs/versioning.md, and the Spec cell of this
+repository's row in the sibling-repositories table. Both modes compare each
+with `spec.version`, the version this script writes to conformance.json, and
+exit 1 when one names another version, when README.md holds no citation,
+when docs/versioning.md has no `AIP spec` row, or when that Spec cell cites
+no version (AIP_VERSION_RE has a citation's exact form).
+
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
-    python3 scripts/conformance_profile.py --check    # exit 1 if the committed file or an ecosystem.md row is stale
+    python3 scripts/conformance_profile.py --check    # exit 1 if the committed file, an ecosystem.md row or a cited AIP spec version is stale
     python3 scripts/conformance_profile.py --help     # print this help and exit; writes nothing
 
 An unrecognized argument also writes nothing: it prints the usage line and
@@ -39,6 +47,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT = REPO_ROOT / "conformance.json"
 ECOSYSTEM = REPO_ROOT / "docs" / "ecosystem.md"
+VERSIONING = REPO_ROOT / "docs" / "versioning.md"
 README = REPO_ROOT / "README.md"
 
 # Status cell of a verifier row in docs/ecosystem.md: `<pass> / <total> PASS`.
@@ -63,6 +72,16 @@ PINNED_COUNT_RE = re.compile(
 )
 # A markdown link, reduced to its text when a row's Repo cell is named.
 LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# A version as a citation names one: a number followed by parts that each
+# open with `.`, `-` or `+` (`1.0.0-draft`, `1.2`, `1.0.0-rc.1`), so
+# punctuation that ends the sentence or the link is not read into it.
+VERSION = r"\d+(?:[.+-][0-9A-Za-z]+)*"
+# An AIP spec version citation in README.md or in a Spec cell: `AIP vX.Y.Z`,
+# also written `(AIP) vX.Y.Z`, `AIP-SPEC vX.Y.Z`, `AIP spec vX.Y.Z` or
+# `AIP specification vX.Y.Z`, with any whitespace before `spec` and the `v`.
+AIP_VERSION_RE = re.compile(rf"\bAIP(?:\)|-SPEC|\s+spec(?:ification)?)?\s+v({VERSION})")
+# The Component cell of the AIP spec row in the docs/versioning.md table.
+VERSIONING_COMPONENT = "AIP spec"
 
 # --- suite metadata (hand-maintained; everything under `requirements` is derived) ---
 SUITE = {
@@ -321,6 +340,100 @@ def other_sibling_row_counts() -> list[str]:
     return problems
 
 
+def table_rows(doc: Path) -> list[tuple[int, list[str]]]:
+    """Return the line number and the stripped cells of each table row in `doc`."""
+    rows = []
+    for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+        if line.startswith("|"):
+            rows.append((lineno, [cell.strip() for cell in line.strip().strip("|").split("|")]))
+    return rows
+
+
+def spec_version_drift() -> list[str]:
+    """Compare the AIP spec version the docs cite with the one conformance.json pins.
+
+    SUITE["spec"]["version"] is written to conformance.json as `spec.version`.
+    Three places cite that version by hand:
+
+    - README.md: each citation AIP_VERSION_RE matches must name it, and the
+      file must hold at least one.
+    - docs/versioning.md: each table row whose Component cell reads
+      `AIP spec` must have a Version cell that reads `v<version>` and nothing
+      else, and the file must hold at least one such row.
+    - docs/ecosystem.md: in each row whose Repo cell reads
+      `aip-conformance (this repo)`, the Spec cell must hold at least one
+      citation and each must name it. When the file or the row is missing,
+      sibling_row_drift reports that and this function adds nothing.
+
+    Returns one message per citation or Version cell that names another
+    version, and one per place that cites none. A pinned version that is
+    not of the form VERSION could be named by no citation, so it is reported
+    alone and nothing is compared.
+    """
+    pinned = SUITE["spec"]["version"]
+    if not re.fullmatch(VERSION, pinned):
+        return [
+            f"scripts/conformance_profile.py: SUITE pins spec.version {pinned!r}, which no "
+            "citation can name: a citation is read as a number followed by parts that "
+            "each open with '.', '-' or '+', as in '1.0.0-draft'"
+        ]
+    pins = f"conformance.json pins spec.version {pinned}"
+    problems = []
+
+    text = README.read_text(encoding="utf-8") if README.exists() else ""
+    citations = list(AIP_VERSION_RE.finditer(text))
+    if not citations:
+        problems.append(
+            f"README.md: no 'AIP vX.Y.Z' citation; {pins}, "
+            f"so the README must cite 'AIP v{pinned}'"
+        )
+    for match in citations:
+        if match.group(1) != pinned:
+            lineno = text.count("\n", 0, match.start(1)) + 1
+            problems.append(
+                f"README.md:{lineno}: cites AIP v{match.group(1)}; {pins}, "
+                f"so the citation must read 'v{pinned}'"
+            )
+
+    if not VERSIONING.exists():
+        problems.append("docs/versioning.md missing")
+    else:
+        version_cells = [
+            (lineno, cells[1])
+            for lineno, cells in table_rows(VERSIONING)
+            if len(cells) >= 2 and cells[0] == VERSIONING_COMPONENT
+        ]
+        if not version_cells:
+            problems.append(
+                f"docs/versioning.md: no '{VERSIONING_COMPONENT}' row; {pins}, so the "
+                f"version pinning table needs the row '{VERSIONING_COMPONENT} | v{pinned}'"
+            )
+        for lineno, cell in version_cells:
+            if cell != f"v{pinned}":
+                problems.append(
+                    f"docs/versioning.md:{lineno}: {VERSIONING_COMPONENT} row pins {cell!r}; "
+                    f"{pins}, so its Version cell must read 'v{pinned}'"
+                )
+
+    repo_cell = f"{SUITE['suite']} (this repo)"
+    for lineno, cells in table_rows(ECOSYSTEM) if ECOSYSTEM.exists() else []:
+        if len(cells) != 3 or cells[0].replace("`", "") != repo_cell:
+            continue
+        cited = AIP_VERSION_RE.findall(cells[1])
+        if not cited:
+            problems.append(
+                f"docs/ecosystem.md:{lineno}: {repo_cell} row cites no AIP version in "
+                f"its Spec cell; {pins}, so the cell must cite 'AIP v{pinned}'"
+            )
+        for version in cited:
+            if version != pinned:
+                problems.append(
+                    f"docs/ecosystem.md:{lineno}: {repo_cell} row cites AIP v{version}; "
+                    f"{pins}, so the citation must read 'v{pinned}'"
+                )
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -330,7 +443,10 @@ def main() -> int:
     ap.add_argument(
         "--check",
         action="store_true",
-        help="write nothing; exit 1 if the committed file or an ecosystem.md row is stale",
+        help=(
+            "write nothing; exit 1 if the committed file, an ecosystem.md row or a "
+            "cited AIP spec version is stale"
+        ),
     )
     args = ap.parse_args()
 
@@ -346,7 +462,12 @@ def main() -> int:
     else:
         OUT.write_text(rendered)
         print(f"wrote conformance.json ({len(build()['requirements'])} requirements)")
-    drift = verifier_status_drift() + sibling_row_drift() + other_sibling_row_counts()
+    drift = (
+        verifier_status_drift()
+        + sibling_row_drift()
+        + other_sibling_row_counts()
+        + spec_version_drift()
+    )
     for problem in drift:
         print(problem)
     if drift:
@@ -355,6 +476,11 @@ def main() -> int:
         "docs/ecosystem.md verifier status rows and sibling row match the fixture set "
         f"({len(fixture_paths())} fixtures) and README.md (v{readme_version()}); "
         "the other sibling rows pin no '<n> fixtures' or '<n> verifiers' count"
+    )
+    print(
+        "README.md, the docs/versioning.md AIP spec row and the docs/ecosystem.md "
+        f"sibling row cite AIP v{SUITE['spec']['version']}, the spec.version "
+        "conformance.json pins"
     )
     return 0
 

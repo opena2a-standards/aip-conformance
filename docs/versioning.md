@@ -14,6 +14,11 @@ for changing the fixture set.
 | Python Ed25519 | `cryptography >= 42.0.0` | [pyca/cryptography](https://github.com/pyca/cryptography) |
 | Conformance fixture format | v1 (this repo) | [`fixtures/challenge-response-valid.json#$schema`](../fixtures/challenge-response-valid.json) |
 
+The AIP spec row's version is the `spec.version` that
+[`conformance.json`](../conformance.json) pins;
+`scripts/conformance_profile.py --check` fails when the row names another
+version ([gate 4](how-it-works.md#continuous-verification)).
+
 The `agentDid`, `issuerDid`, and `keyId` strings in the vectors and fixtures
 are ecosystem-scoped `did:opena2a` identifiers, carried as opaque strings per
 AIP-SPEC §3.2. The suite pins the challenge-response transcript and the key
