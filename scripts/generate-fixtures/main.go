@@ -1,4 +1,4 @@
-// generate-fixtures produces the AIP v1.0.0-draft §5.1 conformance fixture set.
+// generate-fixtures produces the AIP v1.2.0-draft §5.1 conformance fixture set.
 //
 // Every fixture is byte-stable: same seeds, same canonicalization, same JSON
 // encoding settings. Re-running the generator MUST produce identical bytes;
@@ -59,7 +59,7 @@ import (
 )
 
 const (
-	aipVersion        = "1.0.0-draft"
+	aipVersion        = "1.2.0-draft"
 	fixedClockRFC3339 = "2026-05-28T00:00:00Z"
 )
 

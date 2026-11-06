@@ -7,7 +7,7 @@ for changing the fixture set.
 
 | Component | Version | Source |
 |---|---|---|
-| AIP spec | v1.0.0-draft | [`opena2a-org/agent-identity-protocol/AIP-SPEC.md`](https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md) |
+| AIP spec | v1.2.0-draft | [`opena2a-org/agent-identity-protocol/AIP-SPEC.md`](https://github.com/opena2a-org/agent-identity-protocol/blob/main/AIP-SPEC.md) |
 | `did:opena2a` method | v0.1 (W3C registration filed, PR `w3c/did-extensions#717`) | [`opena2a-standards/did-method-opena2a`](https://github.com/opena2a-standards/did-method-opena2a/blob/main/did-method-opena2a.md) |
 | Ed25519 test vector source | RFC 8032 §7.1 Tests 1, 2, 3 and TEST 1024 | [datatracker.ietf.org/doc/html/rfc8032](https://datatracker.ietf.org/doc/html/rfc8032) |
 | Go Ed25519 | `crypto/ed25519` (Go 1.22+ standard library) | [pkg.go.dev/crypto/ed25519](https://pkg.go.dev/crypto/ed25519) |
@@ -18,6 +18,20 @@ The AIP spec row's version is the `spec.version` that
 [`conformance.json`](../conformance.json) pins;
 `scripts/conformance_profile.py --check` fails when the row names another
 version ([gate 4](how-it-works.md#continuous-verification)).
+
+That version is the one `AIP-SPEC.md` declares on its `**Version:**` line
+at main, the text that `spec.ref` in `conformance.json` and every fixture's
+spec reference link to. The three §6.1 fixtures expect the unscored or the
+measured state, which the spec's changelog lists under 1.2.0-draft; the
+five `PARSE_ERROR` and two `UNTRUSTED_ISSUER` fixtures expect §5.1.4 reject
+categories that the changelog lists under Unreleased, after 1.2.0-draft.
+The schema gate ([gate 5](how-it-works.md#continuous-verification)) checks
+out an earlier spec commit, whose `AIP-SPEC.md` declares 1.0.1-draft; the
+two vendored schema files are byte-identical at that commit and at main
+(measured 2026-11-06 at spec commit 9824de3). To compare `spec.version`
+with a checkout of the spec repository, run
+`python3 scripts/conformance_profile.py --check --spec-src <checkout>`: it
+also exits 1 when that checkout's `AIP-SPEC.md` declares another version.
 
 The `agentDid`, `issuerDid`, and `keyId` strings in the vectors and fixtures
 are ecosystem-scoped `did:opena2a` identifiers, carried as opaque strings per

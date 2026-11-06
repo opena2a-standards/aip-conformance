@@ -1,4 +1,4 @@
-"""Reference verifier for the AIP v1.0.0-draft §5.1 challenge-response
+"""Reference verifier for the AIP v1.2.0-draft §5.1 challenge-response
 conformance fixtures.
 
 Walks every *.json file in a directory (or individual fixture files),

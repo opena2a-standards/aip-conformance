@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Regression tests for scripts/conformance_profile.py: the docs/ecosystem.md
-row gates, the AIP spec version gate and the command-line arguments.
+row gates, the AIP spec version gate, the --spec-src comparison and the
+command-line arguments.
 
 The gate tests write an edited copy of docs/ecosystem.md, README.md or
 docs/versioning.md to a temporary directory and point the gates at the copy;
-the command-line tests point the script's output at a conformance.json path
-in a temporary directory. The tracked files are never modified.
+the --spec-src tests write an AIP-SPEC.md to a temporary directory and name
+that directory; the command-line tests point the script's output at a
+conformance.json path in a temporary directory. The tracked files are never
+modified.
 
 Usage:
     python3 -m unittest discover -s tests -v
@@ -553,6 +556,165 @@ class SpecVersionGateTest(unittest.TestCase):
         )
 
 
+class SpecSourceTest(unittest.TestCase):
+    """--spec-src DIR compares spec.version with the version DIR/AIP-SPEC.md declares."""
+
+    # The lines AIP-SPEC.md opens with, ahead of its `**Version:**` line.
+    HEADER = (
+        "# OpenA2A Agent Identity Protocol (OpenA2A AIP)\n"
+        "\n"
+        "## An Open Standard for AI Agent Identity, Capabilities, and Trust\n"
+        "\n"
+    )
+
+    def setUp(self) -> None:
+        self.pinned = conformance_profile.SUITE["spec"]["version"]
+        self.assertNotEqual(self.pinned, OTHER_VERSION)
+        self.pins = f"conformance.json pins spec.version {self.pinned}"
+
+    def spec_text(self, *version_lines: str) -> str:
+        """An AIP-SPEC.md that opens as the spec does, with `version_lines` from line 5 on."""
+        lines = "".join(f"{line}\n" for line in version_lines)
+        return f"{self.HEADER}{lines}**Authors:** OpenA2A\n"
+
+    def run_main(self, text: str | None, *args: str) -> tuple[int, list[str], Path, bool]:
+        """Run main() with `args`, then `--spec-src` naming a temporary
+        directory whose AIP-SPEC.md holds `text`, or that holds no AIP-SPEC.md
+        when `text` is None. Without `--check`, the profile is written to a
+        temporary path. Return the exit code, the printed lines, the
+        AIP-SPEC.md path and whether the profile was written there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_src = Path(tmp) / "spec"
+            spec_src.mkdir()
+            spec = spec_src / "AIP-SPEC.md"
+            if text is not None:
+                spec.write_text(text, encoding="utf-8")
+            profile = Path(tmp) / "conformance.json"
+            out = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                if "--check" not in args:
+                    stack.enter_context(mock.patch.object(conformance_profile, "OUT", profile))
+                stack.enter_context(
+                    mock.patch.object(
+                        sys, "argv", ["conformance_profile.py", *args, "--spec-src", str(spec_src)]
+                    )
+                )
+                stack.enter_context(contextlib.redirect_stdout(out))
+                code = conformance_profile.main()
+            written = profile.exists()
+        return code, out.getvalue().splitlines(), spec, written
+
+    def mismatch(self, spec: Path, lineno: int, declared: str) -> str:
+        return (
+            f"{spec}:{lineno}: declares version {declared}; {self.pins}; when this "
+            "checkout holds the spec text the fixtures test, SUITE in "
+            f"scripts/conformance_profile.py must pin '{declared}'"
+        )
+
+    def test_checkout_declaring_the_pinned_version_passes(self) -> None:
+        code, lines, spec, _ = self.run_main(
+            self.spec_text(f"**Version:** {self.pinned}"), "--check"
+        )
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(lines[0], "conformance.json is current")
+        self.assertEqual(
+            lines[-1],
+            f"{spec} declares version {self.pinned}, the spec.version conformance.json pins",
+        )
+
+    def test_checkout_declaring_another_version_is_reported(self) -> None:
+        code, lines, spec, _ = self.run_main(
+            self.spec_text(f"**Version:** {OTHER_VERSION}"), "--check"
+        )
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines, ["conformance.json is current", self.mismatch(spec, 5, OTHER_VERSION)]
+        )
+
+    def test_a_version_is_compared_whole(self) -> None:
+        shorter = re.sub(r"[.+-][0-9A-Za-z]+$", "", self.pinned)
+        self.assertNotEqual(shorter, self.pinned)
+        for declared in (f"{self.pinned}.1", f"{self.pinned}-rc", f"{self.pinned}+build", shorter):
+            with self.subTest(declared=declared):
+                code, lines, spec, _ = self.run_main(
+                    self.spec_text(f"**Version:** {declared}"), "--check"
+                )
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(lines[1:], [self.mismatch(spec, 5, declared)])
+
+    def test_text_after_the_version_is_not_part_of_it(self) -> None:
+        for line in (
+            f"**Version:** {self.pinned} (dated 2026-10-06)",
+            f"**Version:** {self.pinned}.",
+            f"**Version:**\t{self.pinned}",
+        ):
+            with self.subTest(line=line):
+                code, lines, _, _ = self.run_main(self.spec_text(line), "--check")
+                self.assertEqual(code, 0, lines)
+
+    def test_each_version_line_is_compared(self) -> None:
+        """A second `**Version:**` line is read too, after or before a current one."""
+        for first, second, stale_lineno in (
+            (self.pinned, OTHER_VERSION, 6),
+            (OTHER_VERSION, self.pinned, 5),
+        ):
+            with self.subTest(first=first, second=second):
+                code, lines, spec, _ = self.run_main(
+                    self.spec_text(f"**Version:** {first}", f"**Version:** {second}"), "--check"
+                )
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(lines[1:], [self.mismatch(spec, stale_lineno, OTHER_VERSION)])
+
+    def test_checkout_with_no_version_line_is_reported(self) -> None:
+        for text in (self.spec_text(), self.spec_text(f"Version: {self.pinned}")):
+            with self.subTest(text=text):
+                code, lines, spec, _ = self.run_main(text, "--check")
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(
+                    lines[1:], [f"{spec}: no line opens with '**Version:**'; {self.pins}"]
+                )
+
+    def test_version_line_naming_no_version_is_reported(self) -> None:
+        for line in (
+            "**Version:** draft",
+            "**Version:**",
+            f"**Version:**{self.pinned}",
+            f"**Version:** v{self.pinned}",
+        ):
+            with self.subTest(line=line):
+                code, lines, spec, _ = self.run_main(self.spec_text(line), "--check")
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(lines[1:], [f"{spec}:5: {line!r} names no version; {self.pins}"])
+
+    def test_directory_without_aip_spec_md_is_reported(self) -> None:
+        code, lines, spec, _ = self.run_main(None, "--check")
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(
+            lines[1:],
+            [
+                f"{spec}: no such file; --spec-src names a checkout of the AIP spec "
+                "repository, whose AIP-SPEC.md declares its version on a '**Version:**' line"
+            ],
+        )
+
+    def test_write_mode_compares_too(self) -> None:
+        """With no --check the script writes the profile, then reports the same line."""
+        code, lines, spec, written = self.run_main(self.spec_text(f"**Version:** {OTHER_VERSION}"))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(written)
+        self.assertTrue(lines[0].startswith("wrote conformance.json"), lines)
+        self.assertEqual(lines[1:], [self.mismatch(spec, 5, OTHER_VERSION)])
+
+    def test_a_pinned_version_no_line_can_name_is_left_to_the_citation_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            conformance_profile.SUITE["spec"], {"version": "draft-04"}
+        ):
+            (Path(tmp) / "AIP-SPEC.md").write_text(
+                self.spec_text(f"**Version:** {OTHER_VERSION}"), encoding="utf-8"
+            )
+            self.assertEqual(conformance_profile.spec_source_drift(Path(tmp)), [])
+
+
 class CommandLineTest(unittest.TestCase):
     def run_main(self, *args: str) -> tuple[object, str, str, bool]:
         """Run main() with `args`; return the exit code, stdout, stderr and
@@ -582,6 +744,19 @@ class CommandLineTest(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertIn(conformance_profile.__doc__.strip(), out)
                 self.assertFalse(written)
+
+    def test_help_names_the_spec_src_option(self) -> None:
+        code, out, _, written = self.run_main("--help")
+        self.assertEqual(code, 0)
+        self.assertIn("--spec-src DIR", out)
+        self.assertFalse(written)
+
+    def test_spec_src_without_a_directory_exits_2(self) -> None:
+        code, out, err, written = self.run_main("--check", "--spec-src")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("argument --spec-src: expected one argument", err)
+        self.assertFalse(written)
 
     def test_unrecognized_argument_prints_the_usage_and_exits_2(self) -> None:
         for arg in ("--chekc", "--che", "check"):

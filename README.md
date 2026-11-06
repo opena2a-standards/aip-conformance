@@ -1,7 +1,7 @@
 # aip-conformance
 
 Conformance fixtures and reference verifiers for the
-[Agent Identity Protocol (AIP) v1.0.0-draft](https://github.com/opena2a-org/agent-identity-protocol).
+[Agent Identity Protocol (AIP) v1.2.0-draft](https://github.com/opena2a-org/agent-identity-protocol).
 
 **Status: v0.3 — AIP §5.1 challenge-response transcript fixtures (14) and
 §6.1 trust-score composition fixtures (3) shipped, 2 verifiers,
