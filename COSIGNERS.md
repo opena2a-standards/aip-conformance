@@ -41,7 +41,7 @@ cosign sign-blob MANIFEST.sha256 \
 
 Both verifiers cover AIP §5.1 challenge-response transcripts end to end
 (Ed25519 only — §5.1 does not specify a post-quantum signature path at
-v1.0.0-draft). See the README's *Honest scope notes* section for the
+v1.2.0-draft). See the README's *Honest scope notes* section for the
 canonical signing form, the challenge / response wire-format pinning,
 and the stateless-verifier replay model.
 

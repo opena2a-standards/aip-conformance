@@ -28,9 +28,17 @@ exit 1 when one names another version, when README.md holds no citation,
 when docs/versioning.md has no `AIP spec` row, or when that Spec cell cites
 no version (AIP_VERSION_RE has a citation's exact form).
 
+The spec text is not part of this repository, and neither mode reads it
+unless `--spec-src DIR` names a checkout of the AIP spec repository. With
+it, both modes also read each line of DIR/AIP-SPEC.md that opens with
+`**Version:**`, and exit 1 when one declares a version other than
+`spec.version` or names no version, when no line opens with `**Version:**`,
+or when DIR holds no AIP-SPEC.md.
+
 Usage:
     python3 scripts/conformance_profile.py            # (re)write conformance.json
     python3 scripts/conformance_profile.py --check    # exit 1 if the committed file, an ecosystem.md row or a cited AIP spec version is stale
+    python3 scripts/conformance_profile.py --check --spec-src DIR    # also exit 1 if DIR/AIP-SPEC.md declares a version other than spec.version
     python3 scripts/conformance_profile.py --help     # print this help and exit; writes nothing
 
 An unrecognized argument also writes nothing: it prints the usage line and
@@ -82,6 +90,11 @@ VERSION = r"\d+(?:[.+-][0-9A-Za-z]+)*"
 AIP_VERSION_RE = re.compile(rf"\bAIP(?:\)|-SPEC|\s+spec(?:ification)?)?\s+v({VERSION})")
 # The Component cell of the AIP spec row in the docs/versioning.md table.
 VERSIONING_COMPONENT = "AIP spec"
+# The file of a checkout of the AIP spec repository that holds the spec text,
+# and the line it declares that text's version on: `**Version:** X.Y.Z`.
+SPEC_FILE = "AIP-SPEC.md"
+SPEC_VERSION_PREFIX = "**Version:**"
+SPEC_VERSION_LINE_RE = re.compile(rf"{re.escape(SPEC_VERSION_PREFIX)}[ \t]+({VERSION})")
 
 # --- suite metadata (hand-maintained; everything under `requirements` is derived) ---
 SUITE = {
@@ -90,7 +103,7 @@ SUITE = {
     "spec": {
         "id": "AIP",
         "name": "Agent Identity Protocol",
-        "version": "1.0.0-draft",
+        "version": "1.2.0-draft",
         "ref": "https://github.com/opena2a-standards/agent-identity-protocol/blob/main/AIP-SPEC.md",
     },
     "fixtureManifest": "MANIFEST.sha256",
@@ -121,7 +134,7 @@ SUITE = {
     "notCovered": [
         {
             "item": "§4 signed capability grant artifact",
-            "reason": "canonical form underspecified in AIP v1.0.0-draft; fixtures require spec work first",
+            "reason": "canonical form underspecified in AIP v1.2.0-draft; fixtures require spec work first",
         },
         {
             "item": "runtime surfaces (authorization enforcement, audit-log emission, drift detection)",
@@ -434,6 +447,52 @@ def spec_version_drift() -> list[str]:
     return problems
 
 
+def spec_source_drift(spec_src: Path) -> list[str]:
+    """Compare spec.version with the version a checkout of the AIP spec declares.
+
+    `spec_src` is a checkout of the AIP spec repository. Its AIP-SPEC.md
+    declares the version of its text on a line that opens with
+    `**Version:**`. Every such line is read, so a second one cannot hide a
+    stale one, and the version it names is read as a citation's is
+    (VERSION) and compared whole with SUITE["spec"]["version"].
+
+    Returns one message when the checkout holds no AIP-SPEC.md, when no line
+    opens with `**Version:**`, and per such line that names no version or
+    another version. A pinned version that is not of the form VERSION is
+    reported alone by spec_version_drift, so nothing is compared here.
+    """
+    pinned = SUITE["spec"]["version"]
+    if not re.fullmatch(VERSION, pinned):
+        return []
+    pins = f"conformance.json pins spec.version {pinned}"
+    spec = spec_src / SPEC_FILE
+    if not spec.is_file():
+        return [
+            f"{spec}: no such file; --spec-src names a checkout of the AIP spec "
+            f"repository, whose {SPEC_FILE} declares its version on a "
+            f"'{SPEC_VERSION_PREFIX}' line"
+        ]
+    lines = [
+        (lineno, line)
+        for lineno, line in enumerate(spec.read_text(encoding="utf-8").splitlines(), 1)
+        if line.startswith(SPEC_VERSION_PREFIX)
+    ]
+    if not lines:
+        return [f"{spec}: no line opens with '{SPEC_VERSION_PREFIX}'; {pins}"]
+    problems = []
+    for lineno, line in lines:
+        match = SPEC_VERSION_LINE_RE.match(line)
+        if match is None:
+            problems.append(f"{spec}:{lineno}: {line!r} names no version; {pins}")
+        elif match.group(1) != pinned:
+            problems.append(
+                f"{spec}:{lineno}: declares version {match.group(1)}; {pins}; when this "
+                "checkout holds the spec text the fixtures test, SUITE in "
+                f"scripts/conformance_profile.py must pin '{match.group(1)}'"
+            )
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -446,6 +505,15 @@ def main() -> int:
         help=(
             "write nothing; exit 1 if the committed file, an ecosystem.md row or a "
             "cited AIP spec version is stale"
+        ),
+    )
+    ap.add_argument(
+        "--spec-src",
+        metavar="DIR",
+        type=Path,
+        help=(
+            "a checkout of the AIP spec repository; also exit 1 if its AIP-SPEC.md "
+            "declares a version other than spec.version"
         ),
     )
     args = ap.parse_args()
@@ -467,6 +535,7 @@ def main() -> int:
         + sibling_row_drift()
         + other_sibling_row_counts()
         + spec_version_drift()
+        + (spec_source_drift(args.spec_src) if args.spec_src is not None else [])
     )
     for problem in drift:
         print(problem)
@@ -482,6 +551,11 @@ def main() -> int:
         f"sibling row cite AIP v{SUITE['spec']['version']}, the spec.version "
         "conformance.json pins"
     )
+    if args.spec_src is not None:
+        print(
+            f"{args.spec_src / SPEC_FILE} declares version {SUITE['spec']['version']}, "
+            "the spec.version conformance.json pins"
+        )
     return 0
 
 

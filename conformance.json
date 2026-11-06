@@ -4,7 +4,7 @@
   "spec": {
     "id": "AIP",
     "name": "Agent Identity Protocol",
-    "version": "1.0.0-draft",
+    "version": "1.2.0-draft",
     "ref": "https://github.com/opena2a-standards/agent-identity-protocol/blob/main/AIP-SPEC.md"
   },
   "fixtureManifest": "MANIFEST.sha256",
@@ -35,7 +35,7 @@
   "notCovered": [
     {
       "item": "§4 signed capability grant artifact",
-      "reason": "canonical form underspecified in AIP v1.0.0-draft; fixtures require spec work first"
+      "reason": "canonical form underspecified in AIP v1.2.0-draft; fixtures require spec work first"
     },
     {
       "item": "runtime surfaces (authorization enforcement, audit-log emission, drift detection)",
