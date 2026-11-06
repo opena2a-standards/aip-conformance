@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check the documentation's fixture counts and repository layout against the tree.
+"""Check the documentation's fixture counts, repository layout and go run refs against the tree.
 
-Two kinds of statement in the docs drift when fixtures or files are added,
-so this script recomputes both from the tree:
+Three kinds of statement in the docs drift as the tree changes, so this
+script checks each against the tree:
 
 1. Fixture counts in README.md and docs/*.md. A verifier summary
    (`N pass, M fail`, optionally followed by `(K fixtures)`) must add up to
@@ -12,6 +12,12 @@ so this script recomputes both from the tree:
 2. The repository layout block in docs/how-it-works.md. Every tracked file
    outside dot-directories and dotfiles must sit under one of its entries,
    and every entry must name a tracked file or directory.
+3. The ref of every `go run github.com/opena2a-standards/aip-conformance/<path>@<ref>`
+   command in README.md and docs/*.md. The ref must be `latest`, a full
+   40-hex commit id that `git cat-file -e <ref>^{commit}` finds, or a tag
+   that `git tag -l <ref>` prints: the module proxy answers a tag this
+   repository does not have with `unknown revision`. Commit ids and tags are
+   read from this clone, so the check reports when the clone is shallow.
 
 Usage:
     python3 scripts/docs_check.py    # exit 0 when current; else list each stale statement, exit 1
@@ -30,6 +36,13 @@ SUMMARY = re.compile(r"(\d+)\s+pass,\s+(\d+)\s+fail(?:\s+\((\d+)\s+fixtures?\))?
 NAMED_COUNT = re.compile(r"(\d+)\s+conformance\s+fixtures?")
 EMBEDDED_COUNT = re.compile(r"fixtures:\s+(\d+)\s+embedded\s+in\b")
 LAYOUT_BLOCK = re.compile(r"^## Repository layout\n+```[^\n]*\n(.*?)^```", re.M | re.S)
+GO_RUN = re.compile(
+    r"\bgo\s+run\s+(?:(?:-\S+|\\)\s+)*"
+    r"(?P<target>github\.com/opena2a-standards/aip-conformance(?:/[^\s@`]*)?)@(?P<ref>[^\s`]+)"
+)
+FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+TAG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/-]*")
+REF_TRAILER = ".,;:!?)]}>'\"*"  # sentence punctuation after a ref outside a code span
 
 
 def tracked_files() -> list[str]:
@@ -98,6 +111,41 @@ def check_layout(files: list[str]) -> list[str]:
     return problems
 
 
+def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+
+
+def ref_resolves(root: Path, ref: str) -> bool:
+    """True when ref is `latest`, a full commit id this clone has, or a tag this clone has."""
+    if ref == "latest":
+        return True
+    if FULL_COMMIT.fullmatch(ref) and git(root, "cat-file", "-e", f"{ref}^{{commit}}").returncode == 0:
+        return True
+    return bool(TAG_NAME.fullmatch(ref)) and ref in git(root, "tag", "-l", ref).stdout.splitlines()
+
+
+def check_go_run_refs(root: Path = REPO_ROOT) -> list[str]:
+    problems = []
+    for doc in [root / "README.md", *sorted((root / "docs").glob("*.md"))]:
+        rel = doc.relative_to(root)
+        text = doc.read_text(encoding="utf-8")
+        for m in GO_RUN.finditer(text):
+            ref = m["ref"].rstrip(REF_TRAILER)
+            if not ref_resolves(root, ref):
+                lineno = text.count("\n", 0, m.start()) + 1
+                problems.append(
+                    f"{rel}:{lineno}: `go run {m['target']}@{ref}` names {ref}, which is "
+                    "neither `latest` nor a full commit id or tag this clone has"
+                )
+    if problems and git(root, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        problems = [
+            f"{problem}; this clone is shallow, so fetch its history and tags "
+            "(`git fetch --unshallow --tags`) and run the check again"
+            for problem in problems
+        ]
+    return problems
+
+
 def main() -> int:
     try:
         files = tracked_files()
@@ -106,13 +154,13 @@ def main() -> int:
         return 2
 
     fixture_count = len(list((REPO_ROOT / "fixtures").glob("*.json")))
-    problems = check_counts(fixture_count) + check_layout(files)
+    problems = check_counts(fixture_count) + check_layout(files) + check_go_run_refs()
     for problem in problems:
         print(problem)
     if problems:
         print(f"\n{len(problems)} stale statement(s) in the docs")
         return 1
-    print("docs fixture counts and repository layout are current")
+    print("docs fixture counts, repository layout and go run refs are current")
     return 0
 
 
